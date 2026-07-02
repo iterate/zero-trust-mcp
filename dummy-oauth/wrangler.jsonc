@@ -1,0 +1,8 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "dummy-oauth-provider",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  "observability": { "enabled": true }
+  // Stateless like its sibling: only configuration is the SEAL_KEY secret.
+}

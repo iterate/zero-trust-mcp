@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "zero-trust-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  // Lets this worker fetch other workers.dev URLs on the SAME account over
+  // the public channel (otherwise CF blocks same-account fetches, error 1042).
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "observability": { "enabled": true },
+  "vars": { "DEMO_PROVIDER_URL": "https://dummy-oauth-provider.templestein.workers.dev" }
+  // Deliberately no bindings: the whole point is statelessness.
+  // The only configuration is the SEAL_KEY secret (wrangler secret put SEAL_KEY).
+}
