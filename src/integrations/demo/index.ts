@@ -57,7 +57,7 @@ export const demo: OAuthIntegration = {
     const s = session as DemoSession;
 
     server.registerTool(
-      "demo_whoami",
+      "whoami",
       { description: "Get the authenticated profile from the dummy OAuth provider's API." },
       async () => {
         const res = await fetch(`${s.apiUrl}/api/me`, { headers: { Authorization: `Bearer ${s.accessToken}` } });

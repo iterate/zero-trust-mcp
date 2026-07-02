@@ -22,18 +22,17 @@ const b64url = (b: Uint8Array) => Buffer.from(b).toString("base64url");
 const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
 const challenge = b64url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
 
-const reg = await (await fetch(`${base}/register`, {
+const reg = await (await fetch(`${base}/waitrose/register`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ client_name: "browser-proof", redirect_uris: [redirectUri] }),
 })).json() as any;
 
-const u = new URL(`${base}/authorize`);
+const u = new URL(`${base}/waitrose/authorize`);
 u.searchParams.set("response_type", "code");
 u.searchParams.set("client_id", reg.client_id);
 u.searchParams.set("redirect_uri", redirectUri);
 u.searchParams.set("state", "browser-proof-2");
-u.searchParams.set("scope", "waitrose");
 u.searchParams.set("code_challenge", challenge);
 u.searchParams.set("code_challenge_method", "S256");
 
@@ -58,7 +57,7 @@ while (Date.now() - t0 < 30_000) {
 }
 if (!code) throw new Error("browser never reached the callback URL");
 
-const tokens = await (await fetch(`${base}/token`, {
+const tokens = await (await fetch(`${base}/waitrose/token`, {
   method: "POST",
   headers: { "Content-Type": "application/x-www-form-urlencoded" },
   body: new URLSearchParams({ grant_type: "authorization_code", code, code_verifier: verifier, redirect_uri: redirectUri }).toString(),
@@ -66,7 +65,7 @@ const tokens = await (await fetch(`${base}/token`, {
 if (!tokens.access_token) throw new Error(JSON.stringify(tokens));
 console.log("token exchange OK, expires_in:", tokens.expires_in);
 
-const mcpRes = await fetch(`${base}/mcp`, {
+const mcpRes = await fetch(`${base}/waitrose/mcp`, {
   method: "POST",
   headers: {
     "Content-Type": "application/json",

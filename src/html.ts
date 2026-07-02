@@ -1,20 +1,10 @@
 import type { Integration, PasswordIntegration } from "./integrations/types.js";
 
-export interface WizardStepInfo {
-  position: number;
-  total: number;
-}
-
 function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-export function loginPage(
-  integration: Integration,
-  sealedWiz: string,
-  step: WizardStepInfo,
-  error?: string,
-): string {
+export function loginPage(integration: Integration, sealedState: string, error?: string): string {
   const fields = (integration as PasswordIntegration).fields
     .map(
       (f) => `
@@ -22,8 +12,6 @@ export function loginPage(
       <input id="${f.name}" name="${f.name}" type="${f.type}" required autocomplete="${f.type === "password" ? "current-password" : "username"}" />`,
     )
     .join("\n");
-
-  const progress = step.total > 1 ? `<p class="step">Step ${step.position} of ${step.total}</p>` : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -37,7 +25,6 @@ export function loginPage(
   .card { background: #fff; border-radius: 12px; box-shadow: 0 2px 24px rgba(0,0,0,.08); padding: 2.5rem; width: 22rem; }
   h1 { font-size: 1.2rem; margin: 0 0 .25rem; }
   p.sub { color: #666; font-size: .85rem; margin: 0 0 1.5rem; }
-  p.step { color: #999; font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; margin: 0 0 .5rem; }
   label { display: block; font-size: .8rem; font-weight: 600; margin: 1rem 0 .3rem; }
   input:not([type=hidden]) { width: 100%; box-sizing: border-box; padding: .6rem .7rem; border: 1px solid #ccc; border-radius: 8px; font-size: .95rem; }
   button { margin-top: 1.5rem; width: 100%; padding: .7rem; border: 0; border-radius: 8px; background: #5c8b41; color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; }
@@ -53,13 +40,11 @@ export function loginPage(
 </head>
 <body>
 <main class="card">
-  ${progress}
   <h1>Connect your ${escapeHtml(integration.name)} account</h1>
   <p class="sub">An MCP client is requesting access to ${escapeHtml(integration.name)} on your behalf.</p>
   ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
-  <form method="post" action="/authorize">
-    <input type="hidden" name="wiz" value="${escapeHtml(sealedWiz)}" />
-    <input type="hidden" name="integration" value="${escapeHtml(integration.id)}" />
+  <form method="post" action="/${integration.id}/authorize">
+    <input type="hidden" name="state" value="${escapeHtml(sealedState)}" />
     ${fields}
     <button type="submit">Sign in &amp; authorize</button>
   </form>
@@ -72,14 +57,19 @@ export function loginPage(
 }
 
 export function indexPage(origin: string, integrationIds: string[]): string {
+  const rows = integrationIds
+    .map((id) => `<li><code>${origin}/${id}/mcp</code></li>`)
+    .join("\n");
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>zero-trust-mcp</title>
 <style>body{font-family:ui-monospace,monospace;max-width:42rem;margin:4rem auto;line-height:1.6;padding:0 1rem}</style></head>
 <body>
 <h1>zero-trust-mcp</h1>
-<p>A fully stateless, scope-multiplexed MCP server. Upstream credentials are sealed into the OAuth tokens held by your MCP client — this server stores nothing.</p>
-<p>MCP endpoint: <code>${origin}/mcp</code> (streamable HTTP, OAuth required)</p>
-<p>Connect with no scopes to start; the <code>connect_integration</code> tool adds integrations via 403 scope step-up.</p>
-<p>Integrations: <code>${integrationIds.join("</code>, <code>")}</code></p>
+<p>A fully stateless MCP server. Upstream credentials are sealed into the OAuth tokens held by your MCP client — this server stores nothing.</p>
+<p>One MCP endpoint per integration (streamable HTTP, OAuth required):</p>
+<ul>
+${rows}
+</ul>
+<p>e.g. <code>claude mcp add --transport http waitrose ${origin}/waitrose/mcp</code></p>
 </body></html>`;
 }

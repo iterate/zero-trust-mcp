@@ -1,235 +1,222 @@
 # zero-trust-mcp
 
-**A remote MCP server that stores nothing.** No database, no KV, no sessions — the credentials and tokens for every third-party integration live AES-256-GCM-sealed *inside the OAuth tokens the MCP client itself holds*. The server's only piece of configuration is one 32-byte key.
+**A remote MCP server that stores nothing.** No database, no KV, no sessions — the credentials for every third-party integration live AES-256-GCM-sealed *inside the OAuth tokens the MCP client itself holds*. The server's only configuration is one 32-byte key.
 
-Built on Cloudflare Workers with the [MCP TypeScript SDK v2 beta](https://github.com/modelcontextprotocol/typescript-sdk). Ships with two integrations: [Waitrose](https://github.com/jonastemplestein/waitrose) (a real, username/password grocery API) and a deliberately tiny fake OAuth provider (a second worker, for demonstrating the full OAuth-to-OAuth flow).
+Each integration gets its own path with a complete, standalone OAuth 2.1 lifecycle:
 
 ```
-$ bun test/multiplex.ts https://zero-trust-mcp.example.workers.dev me@example.com hunter2
-
-=== 1. initial connect — no scopes ===
-  tools: connect_integration                      ← the only tool
-=== 2. connect_integration(demo) ===
-  → 403 insufficient_scope, re-authorizing with scope="demo"
-  tools: connect_integration, demo_whoami, disconnect_integration, list_integrations
-=== 3. connect_integration(waitrose) ===
-  → 403 insufficient_scope, re-authorizing with scope="demo waitrose"
-  ✓ wizard showed ONLY the waitrose form (demo fast-passed from sealed cookie)
-  tools: … demo_whoami … waitrose_search_products, waitrose_get_trolley …
+https://<worker>/waitrose/mcp     ← real grocery API, username/password upstream
+https://<worker>/demo/mcp         ← fake OAuth provider (second worker), OAuth upstream
 ```
+
+Connecting with the real Claude CLI just works:
+
+```
+$ claude mcp add --transport http waitrose https://<worker>/waitrose/mcp
+$ claude mcp list
+waitrose: https://<worker>/waitrose/mcp (HTTP) - ! Needs authentication
+# /mcp → authenticate → login form → …
+waitrose: https://<worker>/waitrose/mcp (HTTP) - ✔ Connected
+
+> Use the waitrose tools to check what's in my trolley
+⏺ waitrose - get_trolley()
+  ⎿ Duchy Organic Chicken Breast Fillets, Yeo Valley Whole Milk, … total £47.30
+```
+
+Built on Cloudflare Workers with the [MCP TypeScript SDK v2 beta](https://github.com/modelcontextprotocol/typescript-sdk). The Waitrose client is vendored verbatim from [jonastemplestein/waitrose](https://github.com/jonastemplestein/waitrose).
 
 ## Why
 
-Remote MCP servers are becoming the way agents reach third-party APIs. The default architecture is uncomfortable: a hosted MCP server that proxies to upstream APIs normally keeps a **database of everyone's upstream credentials** — refresh tokens, sometimes passwords. That database is a breach magnet, an operational liability, and a trust problem ("why does this random connector service have my Gmail refresh token in its Postgres?").
+Remote MCP servers are becoming the way agents reach third-party APIs. The default architecture is uncomfortable: a hosted MCP server that proxies to upstream APIs normally keeps a **database of everyone's upstream credentials** — refresh tokens, sometimes passwords. That database is a breach magnet, an operational liability, and a trust problem ("why does this random connector service have my grocery password in its Postgres?").
 
-This project explores the other extreme: **the client is the database.** OAuth already forces MCP clients to hold an access token and a refresh token and to send them back on every request and refresh. If those tokens are encrypted blobs containing the upstream credentials, the server needs *zero storage* — it unseals state from each request, acts on it, and (at refresh time) hands back updated state. The client can't read the blobs; the server can't act without being handed them. Neither side alone holds usable credentials. Hence: zero trust.
+This project explores the other extreme: **the client is the database.** OAuth already forces MCP clients to hold an access token and a refresh token, send them back on every request, and replace them on every refresh. If those tokens are encrypted blobs *containing the upstream credentials*, the server needs zero storage — it unseals state from each request, acts on it, and hands back updated state at refresh time. The client can't read the blobs; the server can't act without being handed them. Neither side alone holds usable credentials. Hence: zero trust.
 
-The pattern is old and sound — it's how [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) seals sessions into cookies and how Rails encrypts session cookies — but as far as we could find, nobody had written it up for MCP.
+The crypto pattern is old and sound — it's how [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) seals sessions into cookies and how Rails encrypts session cookies — but as far as we could find, nobody had written it up for MCP.
 
 ## The architecture
 
+One worker serves every integration, but each integration path is an **independent authorization-server + resource-server pair**. There is no shared session, no shared grant, no coupling: a token sealed for `/waitrose` is cryptographically garbage at `/demo`.
+
 ```mermaid
 flowchart LR
-    subgraph Client["MCP client (Claude, Inspector, …)"]
-        TOK["sealed access + refresh token<br/><i>← this is the entire database</i>"]
+    subgraph Client["MCP client (Claude Code, claude.ai, Inspector)"]
+        T1["waitrose connection:<br/>sealed access + refresh token"]
+        T2["demo connection:<br/>sealed access + refresh token"]
     end
-    subgraph Worker["zero-trust-mcp · one Cloudflare Worker, zero bindings"]
-        MCP["/mcp<br/>MCP endpoint (resource server)"]
-        AS["/authorize · /token · /register<br/>OAuth 2.1 authorization server"]
+    subgraph Worker["zero-trust-mcp · one Worker, zero bindings"]
+        W["/waitrose/mcp · /waitrose/authorize<br/>/waitrose/token · /waitrose/register"]
+        D["/demo/mcp · /demo/authorize<br/>/demo/token · /demo/callback …"]
     end
-    subgraph Browser["user's browser"]
-        COOKIE["sealed grant cookie<br/><i>wizard fast-pass state</i>"]
-    end
-    UP1["Waitrose API<br/><i>(password login, 15-min tokens)</i>"]
-    UP2["dummy-oauth-provider<br/><i>(second worker: /authorize /token /api/me)</i>"]
+    UP1["Waitrose API<br/><i>password login, 15-min tokens,<br/>no working refresh</i>"]
+    UP2["dummy-oauth-provider<br/><i>a second ~140-line worker:<br/>/authorize /token /api/me</i>"]
 
-    Client -- "Bearer &lt;sealed blob&gt;" --> MCP
-    Client -- "grants (code / refresh)" --> AS
-    Browser -- "login wizard" --> AS
-    MCP -- "upstream calls with unsealed sessions" --> UP1
-    MCP --> UP2
-    AS -- "verify logins / exchange codes" --> UP1
-    AS --> UP2
+    T1 -- "Bearer ⟨sealed blob⟩" --> W
+    T2 -- "Bearer ⟨sealed blob⟩" --> D
+    W -- "unsealed session" --> UP1
+    D -- "unsealed session" --> UP2
 ```
 
-One worker is simultaneously the **OAuth 2.1 authorization server** (it issues the tokens) and the **MCP resource server** (it consumes them) — the MCP auth spec explicitly allows this. Every artifact it issues is the same thing: `base64url( version ‖ 96-bit IV ‖ AES-256-GCM ciphertext )` under the single `SEAL_KEY`. GCM gives integrity, so a blob handed to an untrusted party can be trusted when it comes back. Expiry, type tags, and PKCE bindings live *inside* the plaintext.
+Every artifact the server issues is the same construction: `base64url( version ‖ 96-bit IV ‖ AES-256-GCM ciphertext )` under the single `SEAL_KEY`. GCM gives integrity, so a blob handed to an untrusted party can be trusted when it comes back. Expiry, the integration id (audience), and PKCE bindings live *inside* the plaintext.
 
 ### What's sealed where
 
-| Artifact | Sealed contents | Held by |
+| Artifact | Sealed contents | TTL |
 |---|---|---|
-| `client_id` | the registered `redirect_uris` (stateless dynamic client registration) | MCP client |
-| wizard state (`wiz`) | OAuth params + integrations collected so far, 10-min TTL | in flight (form field / upstream `state` param) |
-| authorization code | the full collected bundle + PKCE challenge + redirect_uri, 2-min TTL | in flight |
-| **access token** | per-integration *sessions* (upstream access tokens), `exp` = soonest upstream expiry | MCP client |
-| **refresh token** | per-integration *grants* (credentials / upstream refresh tokens) **and** still-valid sessions (a snapshot) | MCP client |
-| grant cookie | per-integration grants from previous wizard runs, 90 days | user's browser |
+| `client_id` | the registered `redirect_uris` (stateless dynamic client registration) | ∞ |
+| authorize state | the validated OAuth params, riding through the login form (hidden field) or the upstream provider (`state` param) | 10 min |
+| authorization code | upstream session + grant + PKCE challenge + redirect_uri | 2 min |
+| **access token** | the upstream *session* (what a request needs) | upstream's expiry |
+| **refresh token** | the durable *grant* (what can mint sessions): credentials for password integrations, the upstream refresh token for OAuth ones | ∞ |
 
-The split between access and refresh token matters: the access token holds only what a request needs; the refresh token holds what can *mint* new sessions. A refresh grant is the one moment the server can write new state back to the client — so that's where upstream refreshes happen.
+The access/refresh split is the heart of the design. The access token holds only what a request needs. The refresh token holds what can create new sessions — and the refresh grant is the *only* moment the protocol lets the server hand new state to the client, so that's exactly where upstream re-authentication happens.
 
-## Scopes are integrations
-
-The granted OAuth scope set *is* the list of connected integrations. `scope: "waitrose demo"` = a bundle with both. This makes everything else fall out of standard OAuth machinery:
-
-- **A fresh connection has no integrations.** The server deliberately doesn't advertise `scopes_supported`, so clients authorize with an empty scope. The wizard has nothing to collect and instantly redirects back — the user sees nothing. The resulting token grants exactly one tool: `connect_integration`.
-- **Connecting an integration is a scope step-up.** Calling `connect_integration({integration: "waitrose"})` while `waitrose` isn't in the granted scope makes the server answer **HTTP 403** with `WWW-Authenticate: Bearer error="insufficient_scope", scope="demo waitrose"` ([SEP-2350](https://modelcontextprotocol.io/specification/draft/basic/authorization)). A compliant client re-runs the authorization flow with the advertised scope, the wizard collects only what's missing, and the retried tool call succeeds with the new token.
-- **Disconnecting is a step-down** — the same 403 with the *reduced* scope set.
-- **Tools appear and disappear with the token.** The MCP SDK v2's per-request server factory rebuilds the tool surface on every request from whatever the bearer token contains. No session, no registry — the token *is* the configuration.
+### The connect flow
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant A as Agent
-    participant C as MCP client
-    participant S as zero-trust-mcp
+    participant C as Claude Code
+    participant S as /waitrose/*
+    participant U as Waitrose API
     participant B as Browser
-    participant P as Provider (e.g. dummy OAuth)
 
-    A->>C: call connect_integration(demo)
-    C->>S: POST /mcp tools/call (scope: "")
-    S-->>C: 403 insufficient_scope, scope="demo"
-    C->>B: open /authorize?scope=demo (PKCE)
-    B->>S: GET /authorize
-    S->>B: 302 → provider /authorize (wizard state sealed in `state`)
-    B->>P: consent screen → Approve
-    P->>B: 302 → /callback/demo?code=…
-    B->>S: GET /callback/demo
-    S->>P: exchange code for tokens (server-side)
-    S-->>B: 302 → client redirect_uri?code=…<br/>+ Set-Cookie: sealed grants
-    C->>S: POST /token (code + PKCE verifier)
-    S-->>C: sealed access + refresh token, scope="demo"
-    C->>S: retry tools/call connect_integration(demo)
-    S-->>C: "✓ connected" — demo_* tools now in tools/list
+    C->>S: POST /waitrose/mcp (no token)
+    S-->>C: 401 + WWW-Authenticate: resource_metadata="…/waitrose/mcp"
+    C->>S: discovery (RFC 9728 + RFC 8414) + dynamic registration (RFC 7591)
+    C->>B: open /waitrose/authorize (PKCE, loopback redirect)
+    B->>S: GET → login form (OAuth params sealed in hidden field)
+    B->>S: POST credentials
+    S->>U: real login — bad credentials never mint a code
+    S-->>B: 302 → localhost:PORT/callback?code=⟨sealed session+grant⟩
+    C->>S: POST /waitrose/token (code + PKCE verifier)
+    S-->>C: sealed access token (15 min) + sealed refresh token
+    C->>S: tools/call get_trolley (Bearer ⟨sealed⟩)
+    S->>U: API call with unsealed session
 ```
 
-## The wizard: multi-integration consent with zero server state
+For an OAuth-style upstream (see the `demo` integration), steps 5–7 are replaced by a redirect to the provider's consent screen, with our sealed state riding through the provider's `state` parameter; the callback exchanges the provider's code server-side. Either way the *shape* the MCP client sees is identical.
 
-`/authorize` is a chain: one step per requested integration — a password form for `kind: "password"` integrations, a redirect out to the provider for `kind: "oauth"` ones. Progress rides in a sealed `wiz` blob (hidden form field, or the OAuth `state` parameter through upstream providers). Each step unseals it, appends the collected grant, re-seals, and passes it along. The final step mints the authorization code from the accumulated bundle.
+### The refresh / recovery lifecycle
 
-The trick that makes step-up UX painless is the **sealed browser cookie**. Every completed wizard sets a 90-day cookie containing the grants it collected — sealed with the same key, unreadable by the browser. When a re-authorization comes through (step-up, step-down, or recovery after upstream revocation), the wizard first tries to satisfy each requested integration *from the cookie*, contacting the upstream to verify the grant still works. Only integrations it can't fast-pass show UI. Connecting your second integration therefore asks for exactly one login, and a disconnect re-auth is fully invisible.
-
-The server still stores nothing — this state lives in the *user's browser*, which is allowed to remember its own user.
-
-## Snapshot refresh tokens
-
-Different upstreams expire at different rates (Waitrose: 15 minutes and its refresh mutation doesn't work, so re-login is the only path; the dummy provider: 1 hour with proper refresh tokens). The bundle's `expires_in` is the *minimum* across integrations, so the client refreshes on the fastest-expiring upstream's schedule.
-
-A naive design would re-contact every upstream on every refresh. Instead the refresh token is a **snapshot**: it carries each integration's durable grant *and* its current session with expiry. The refresh handler reuses sessions that are still comfortably valid and only refreshes what's actually near expiry:
+The Waitrose upstream expires tokens after 15 minutes and its refresh mutation doesn't work — re-login is the only path. That's invisible to the user:
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant C as MCP client
-    participant S as /token
-    participant W as Waitrose
-    participant D as dummy provider
+    participant S as /waitrose/token
+    participant U as Waitrose API
 
-    Note over C: access token expires (15 min, waitrose's pace)
-    C->>S: grant_type=refresh_token (sealed snapshot)
-    S->>S: unseal: waitrose session expired,<br/>demo session valid for 40 more min
-    S->>W: re-login with sealed credentials
-    Note over S,D: demo NOT contacted — session carried forward
-    S-->>C: new sealed access token (fresh waitrose + existing demo)<br/>new sealed refresh token (updated snapshot)
+    Note over C: access token expires (15 min)
+    C->>S: grant_type=refresh_token ⟨sealed credentials⟩
+    S->>U: fresh login with unsealed credentials
+    alt upstream accepts
+        S-->>C: new sealed access + refresh token
+    else grant is dead (password changed, revoked)
+        S-->>C: 400 invalid_grant
+        Note over C: client discards tokens and re-runs the<br/>interactive flow — the standard OAuth ladder,<br/>supported by every compliant client
+    end
 ```
 
-If one upstream's refresh fails, the bundle **degrades instead of dying**: that integration is marked with an error (visible via `list_integrations`, retried on a later refresh), while every other integration keeps working. Transient upstream failures never destroy grant material; only an explicit re-authorization replaces it.
+No custom client behavior is required anywhere: expiry-driven refresh, 401-driven refresh, and `invalid_grant`-driven re-authorization are the three rungs of the ladder every MCP client already implements.
 
-## The meta-tools
+## Lessons learned: why one path per integration (and not scopes)
 
-| Tool | Available | Mechanism |
-|---|---|---|
-| `connect_integration` | always | 403 step-up → wizard → retried call confirms |
-| `disconnect_integration` | when ≥1 connected | 403 step-down with reduced scope |
-| `list_integrations` | when ≥1 connected | pure read of the unsealed token: status, expiry, degraded flags |
-| `waitrose_*`, `demo_*` | per granted scope | rebuilt per request from the sealed sessions |
+The first version of this repo multiplexed all integrations behind a single `/mcp` endpoint, with OAuth **scopes as the integration set** and a `connect_integration` meta-tool that answered **403 `insufficient_scope`** to trigger a scope step-up re-authorization (SEP-2350), plus a sealed browser cookie so re-auth only prompted for the new integration. It was elegant and it worked perfectly — against a test client written to the spec.
+
+Real MCP clients (July 2026) don't do scope step-up. They treat the 403 as a hard failure and force a full re-authentication instead of escalating scopes, which turns "connect another integration" into "reconnect everything, confusingly." The lesson: **the only OAuth behaviors you can rely on across today's MCP clients are the basics** — discovery from a 401 challenge, dynamic registration, PKCE, refresh grants, and `invalid_grant` → re-authorize.
+
+Path-per-integration needs nothing else, and it's simpler everywhere: no scopes, no meta-tools, no wizard, no cookie, ~40% less code. Each connection has one integration, one lifecycle, one failure domain. Clients show each integration as its own named server with its own tool list, which is also just... better UX. (The multiplexed version lives in git history if you want to see it — `git log --all --oneline`.)
 
 ## Repo layout
 
 ```
 src/
-  index.ts               router, step-up interception, per-request MCP server factory
-  oauth.ts               the entire stateless authorization server (~450 lines)
-  seal.ts                AES-256-GCM seal/unseal (~70 lines)
-  html.ts                wizard login page + index page
+  index.ts               path router + per-request MCP server factory     (~120 lines)
+  oauth.ts               the entire stateless authorization server        (~380 lines)
+  seal.ts                AES-256-GCM seal/unseal                          (~70 lines)
+  html.ts                login page + index page
   integrations/
     types.ts             Integration interface (password | oauth kinds)
     waitrose/
-      client.ts          vendored verbatim from jonastemplestein/waitrose (dependency-free)
-      index.ts           login + 6 tools
+      client.ts          vendored verbatim from jonastemplestein/waitrose
+      index.ts           login + 6 tools (search, trolley, orders, account)
     demo/
-      index.ts           OAuth-kind integration against the dummy provider (~70 lines)
+      index.ts           OAuth-kind integration, ~70 lines
 dummy-oauth/
-  src/index.ts           the fake provider: /authorize, /token, /api/me (~140 lines)
-  wrangler.jsonc
+  src/index.ts           the fake provider: /authorize, /token, /api/me   (~140 lines)
 test/
-  multiplex.ts           scripted MCP client WITH step-up support — the full journey
+  journey.ts             scripted MCP client: both integrations, PKCE ± , refresh, audience binding
   browser-proof.ts       drives the login page in headless Chrome via agent-browser
 ```
 
 ### Adding an integration
 
-An integration is a folder exporting one object. Password-style:
+One folder, one object, one line in the registry. Password-style:
 
 ```ts
 export const thing: PasswordIntegration = {
   id: "thing", name: "Thing", kind: "password",
-  fields: [{ name: "username", label: "Email", type: "email" }, …],
+  fields: [{ name: "username", label: "Email", type: "email" }, /* … */],
   login: async (creds, env) => ({ session, expiresInSeconds, grant: creds }),
-  refreshGrant: (grant, env) => /* re-login */,
-  registerTools(server, session) { server.registerTool("thing_do_it", …); },
+  refreshGrant: (grant, env) => /* re-login with the sealed credentials */,
+  registerTools(server, session) { server.registerTool("do_it", /* … */); },
 };
 ```
 
-OAuth-style integrations swap `login`/`fields` for `authorizeUrl` / `exchangeCode` (see `integrations/demo`). Register it in `src/index.ts`'s `integrations` map — scope handling, wizard steps, cookie fast-pass, refresh, and the meta-tools all pick it up automatically.
+OAuth-style integrations swap `login`/`fields` for `authorizeUrl`/`exchangeCode` (see `src/integrations/demo`). Add it to the `integrations` map in `src/index.ts` and it's live at `/thing/mcp` with the complete OAuth lifecycle — discovery, registration, login page, refresh, recovery.
+
+The `grant` is whatever your integration needs to mint future sessions: credentials for password APIs (like Waitrose, where refresh doesn't work), the upstream refresh token for OAuth APIs (like Gmail would be). It's sealed into the refresh token and never stored.
 
 ## Running it
 
-Prerequisites: [bun](https://bun.sh), a Cloudflare account, `wrangler` logged in.
+Prerequisites: [bun](https://bun.sh), a Cloudflare account, `wrangler` logged in (set `CLOUDFLARE_ACCOUNT_ID` if your token spans several accounts).
 
 ```sh
 bun install
 
-# each worker needs its own 32-byte sealing key (the ONLY configuration)
+# each worker's only configuration: a 32-byte sealing key
 openssl rand -base64 32 | bunx wrangler secret put SEAL_KEY -c dummy-oauth/wrangler.jsonc
 openssl rand -base64 32 | bunx wrangler secret put SEAL_KEY
 
 bunx wrangler deploy -c dummy-oauth/wrangler.jsonc     # note the URL it prints…
-# …and put it in wrangler.jsonc's DEMO_PROVIDER_URL var, then:
+# …put it in wrangler.jsonc's DEMO_PROVIDER_URL var, then:
 bunx wrangler deploy
 ```
 
-If your Cloudflare token spans multiple accounts, set `CLOUDFLARE_ACCOUNT_ID`. For local dev, put `SEAL_KEY=...` in `.dev.vars` (gitignored). Note `global_fetch_strictly_public` in `wrangler.jsonc`: without it, Cloudflare blocks a worker fetching another worker's `workers.dev` URL on the same account (error 1042).
+For local dev put `SEAL_KEY=…` in `.dev.vars` (gitignored). Note the `global_fetch_strictly_public` compatibility flag in `wrangler.jsonc`: without it, Cloudflare blocks a worker fetching another worker's `workers.dev` URL on the same account (error 1042).
 
-Prove the whole journey against your deployment (needs a real Waitrose login):
+Prove everything against your deployment (the Waitrose leg needs a real login):
 
 ```sh
-bun test/multiplex.ts https://zero-trust-mcp.<you>.workers.dev you@example.com yourpassword
+bun test/journey.ts https://zero-trust-mcp.<you>.workers.dev you@example.com yourpassword
 ```
 
-Or connect a real client: `claude mcp add --transport http shopping https://zero-trust-mcp.<you>.workers.dev/mcp`.
+Or connect the real thing:
+
+```sh
+claude mcp add --transport http waitrose https://zero-trust-mcp.<you>.workers.dev/waitrose/mcp
+claude   # → /mcp → waitrose → Authenticate
+```
 
 ## Spec compliance
 
-Implements the [MCP authorization spec (2025-06-18)](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization): RFC 9728 protected-resource metadata (+ `WWW-Authenticate` pointers on 401), RFC 8414 authorization-server metadata, RFC 7591 dynamic client registration, PKCE S256 (enforced), refresh grants with rotation, port-agnostic loopback redirect matching for CLI clients (RFC 8252), and SEP-2350 scope step-up. Legacy (2025-era) MCP clients are served by the SDK's stateless fallback; 2026-07-28-era clients get the modern per-request envelope.
+Implements the [MCP authorization spec (2025-06-18)](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization) per integration path: RFC 9728 protected-resource metadata (advertised via `WWW-Authenticate` on 401), RFC 8414 authorization-server metadata with path-insertion discovery for the path-scoped issuers, RFC 7591 dynamic client registration, PKCE S256 (enforced, verified in tests), refresh grants, audience-bound tokens (the integration id is sealed in and checked), and port-agnostic loopback redirect matching for CLI clients (RFC 8252). Verified end-to-end against Claude Code's real OAuth implementation.
 
 ## Honest limitations (read before using for anything real)
 
-Statelessness has real costs. Known, deliberate gaps:
-
-- **Authorization codes are not single-use.** OAuth 2.1 wants replay-proof codes; with no storage there's no way to burn one. Mitigations: 2-minute TTL + PKCE binding (a replayed code needs the same verifier).
-- **No revocation.** A sealed token is valid until it expires. Upstream revocation still works (refresh fails → re-auth), and rotating `SEAL_KEY` is a global kill-switch — which also logs out every user. Version the key (a prefix byte already exists) if you need graceful rotation.
-- **The cookie fast-pass is silent auto-consent.** Anyone who can register a client (DCR is open, per the MCP spec's recommendation) and get a user to *click an authorize link* in the browser holding the grant cookie gets a token for that user's integrations — PKCE doesn't help because the attacker owns the client. A production version must show a consent screen ("Continue connecting Waitrose + Demo for <client>?") whenever a fast-pass occurs, and should display the requesting client's identity.
-- **Sealed credentials exist in more places.** The user's password (for password-kind integrations) sits AES-sealed inside the refresh token in the client's token store and inside a browser cookie. The crypto is sound, but your threat model must be comfortable with ciphertext-at-rest in client hands — and with `SEAL_KEY` being the single secret that matters. Put it in HSM-grade secret storage; it *is* the database now.
-- **Scope step-up (SEP-2350) client support is uneven** (July 2026). The scripted test client implements it; check your target MCP clients. Everything else here degrades gracefully to the universal 401 → refresh → re-authorize ladder plus a manual "reconnect".
+- **Authorization codes are not single-use.** With no storage there's nothing to burn a code against. Mitigations: 2-minute TTL + PKCE binding (a replayed code needs the same verifier).
+- **No revocation.** A sealed token is valid until it expires. Upstream revocation still propagates (refresh fails → `invalid_grant` → re-authorize), and rotating `SEAL_KEY` is a global kill-switch — which also logs out every user. Version the key (a version byte already exists in the blob format) for graceful rotation.
+- **Sealed credentials live in client hands.** For password integrations, the user's password sits AES-sealed inside the refresh token in the MCP client's token store. The crypto is sound; your threat model must be comfortable with ciphertext-at-rest outside your infrastructure — and with `SEAL_KEY` being the one secret that matters. It *is* the database now; guard it accordingly.
+- **Password-kind integrations are a workaround, not a virtue.** Waitrose has no OAuth, so the login form is the only way in. For upstreams with real OAuth (Gmail, etc.) the oauth-kind integration keeps passwords out of the picture entirely — the sealed grant is just the upstream refresh token.
 - **The MCP SDK v2 is beta** (`2.0.0-beta.1`); stable is expected 2026-07-28 alongside the new spec revision.
 
 ## Prior art & references
 
-- [cloudflare/workers-oauth-provider](https://github.com/cloudflare/workers-oauth-provider) — Kenton Varda's OAuth library for Workers. Its props-encryption design (secrets encrypted under token-derived keys) inspired parts of this, but it requires KV: it's "half-stateless" (no secrets stored, but state is).
+- [cloudflare/workers-oauth-provider](https://github.com/cloudflare/workers-oauth-provider) — Kenton Varda's OAuth library for Workers. Its props-encryption design inspired parts of this, but it hard-requires KV: no secrets stored, but state is.
 - [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) — seals upstream tokens into browser cookies; the closest non-MCP relative of this design.
 - [FastMCP's OAuth proxy](https://gofastmcp.com/servers/auth/oauth-proxy) — the stateful version of the upstream-token-wrapping pattern (Redis/DynamoDB + Fernet).
 - [MCP authorization spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization) · [MCP TypeScript SDK v2](https://github.com/modelcontextprotocol/typescript-sdk) · [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728) · [RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) · [RFC 7591](https://www.rfc-editor.org/rfc/rfc7591)
-- The Waitrose client is vendored verbatim from [jonastemplestein/waitrose](https://github.com/jonastemplestein/waitrose).
 
 ## License
 
@@ -237,4 +224,4 @@ MIT
 
 ---
 
-*Built in an afternoon with [Claude Code](https://claude.com/claude-code) as an exploration of stateless MCP architecture. It works — the test transcript at the top is real — but treat it as a design document with a running proof, not a product.*
+*Built with [Claude Code](https://claude.com/claude-code) as an exploration of stateless MCP architecture. It works — a real Claude Code instance completed the OAuth flow and read a real grocery trolley through it — but treat it as a design document with a running proof, not a product.*

@@ -1,31 +1,35 @@
 /**
- * Fully stateless, scope-multiplexed OAuth 2.1 authorization server.
+ * A fully stateless OAuth 2.1 authorization server, instantiated once per
+ * integration path (/waitrose/*, /demo/*). Each integration is its own
+ * little AS + resource-server pair; a token minted for one path is invalid
+ * on every other (the integration id is sealed into the token).
  *
- * Scopes ARE integrations: scope "waitrose demo" = a bundle with both.
- * Every artifact is a sealed AES-GCM blob — nothing is stored server-side:
+ * Nothing is stored server-side. Every artifact is a sealed AES-GCM blob:
  *
- * - client_id .... sealed registered redirect_uris
- * - /authorize ... multi-step wizard; progress rides in a sealed `wiz` blob
- *                  (hidden form field / OAuth state through upstream providers)
- * - cookie ....... sealed per-integration grants in the USER'S BROWSER, so a
- *                  re-authorization only asks for what it can't fast-pass
- * - code ......... sealed collected bundle + PKCE challenge
- * - access ....... sealed sessions per integration, exp = min across bundle
- * - refresh ...... sealed SNAPSHOT: grants + still-valid sessions, so a
- *                  refresh grant only re-contacts upstreams that expired
+ * - client_id ...... the registered redirect_uris
+ * - authorize state  the validated OAuth params, riding through the login
+ *                    form (hidden field) or the upstream provider (`state`)
+ * - code ........... upstream session + grant + PKCE challenge
+ * - access token ... the upstream session (what a request needs)
+ * - refresh token .. the durable grant (what can mint new sessions):
+ *                    credentials for password integrations, the upstream
+ *                    refresh token for OAuth ones
+ *
+ * Lifecycle: access token expires at the upstream's pace → the MCP client
+ * runs a refresh grant → we re-establish the upstream session from the
+ * sealed grant. If THAT fails (revoked upstream, changed password), the
+ * grant is dead: we answer invalid_grant and the client re-runs the
+ * interactive flow. That ladder is standard OAuth — no client cooperation
+ * beyond spec compliance is required.
  */
 
 import { seal, unseal, sha256b64url, nowSeconds } from "./seal.js";
 import type { Env, Integration, PasswordIntegration } from "./integrations/types.js";
-import { loginPage, type WizardStepInfo } from "./html.js";
+import { loginPage } from "./html.js";
 
 const AUTH_CODE_TTL = 120;
-const WIZARD_TTL = 600;
-const EMPTY_BUNDLE_TTL = 3600;
+const AUTHORIZE_STATE_TTL = 600;
 const MAX_ACCESS_TTL = 3600;
-const SESSION_REUSE_MARGIN = 90; // refresh a session if it expires within this many seconds
-const COOKIE_NAME = "ztm_grants";
-const COOKIE_TTL = 60 * 60 * 24 * 90;
 
 // ---------------------------------------------------------------------------
 // Sealed payload shapes
@@ -36,28 +40,22 @@ interface ClientPayload {
   ru: string[];
 }
 
-/** Per-integration state bundled through code + refresh token. */
-interface IntegrationState {
-  grant: unknown;
-  s: unknown; // session
-  exp: number; // session expiry (epoch seconds)
-  err?: string; // set when the last refresh attempt failed (degraded, not dead)
-}
-
-interface WizardPayload {
-  t: "wiz";
-  scopes: string[];
-  collected: Record<string, IntegrationState>;
+/** The validated /authorize request, in flight through form or provider. */
+interface StatePayload {
+  t: "state";
+  i: string; // integration id
   ru: string; // client redirect_uri
   st: string; // client state
-  cc: string; // PKCE challenge
+  cc: string; // PKCE challenge (S256)
   exp: number;
 }
 
 interface CodePayload {
   t: "code";
-  scopes: string[];
-  bundle: Record<string, IntegrationState>;
+  i: string;
+  s: unknown; // upstream session
+  se: number; // session expiry (epoch seconds)
+  grant: unknown;
   cc: string;
   ru: string;
   exp: number;
@@ -65,20 +63,15 @@ interface CodePayload {
 
 export interface AccessPayload {
   t: "access";
-  scopes: string[];
-  integ: Record<string, { s: unknown; exp: number; err?: string }>;
+  i: string;
+  s: unknown;
   exp: number;
 }
 
 interface RefreshPayload {
   t: "refresh";
-  scopes: string[];
-  integ: Record<string, IntegrationState>;
-}
-
-interface CookiePayload {
-  t: "cookie";
-  g: Record<string, unknown>; // integration id → grant
+  i: string;
+  grant: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +98,7 @@ function htmlResponse(body: string, status = 200): Response {
 }
 
 function oauthError(error: string, description: string, status = 400): Response {
-  return jsonResponse({ error, error_description: description }, status);
+  return jsonResponse({ error, error_description: description }, status, { "Cache-Control": "no-store" });
 }
 
 function redirectUriAllowed(candidate: string, registered: string[]): boolean {
@@ -131,39 +124,27 @@ function redirectUriAllowed(candidate: string, registered: string[]): boolean {
   }
 }
 
-async function readGrantCookie(request: Request, sealKey: string): Promise<Record<string, unknown>> {
-  const header = request.headers.get("Cookie") ?? "";
-  const match = header.match(new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([^;]+)`));
-  if (!match) return {};
-  const payload = await unseal<CookiePayload>(match[1], sealKey);
-  return payload?.t === "cookie" ? payload.g : {};
-}
-
-async function grantCookieHeader(grants: Record<string, unknown>, sealKey: string): Promise<string> {
-  const sealed = await seal({ t: "cookie", g: grants } satisfies CookiePayload, sealKey);
-  return `${COOKIE_NAME}=${sealed}; Path=/; Max-Age=${COOKIE_TTL}; HttpOnly; Secure; SameSite=Lax`;
-}
-
 // ---------------------------------------------------------------------------
-// Discovery metadata (scopes deliberately NOT advertised: fresh connections
-// start with an empty bundle and grow via 403 insufficient_scope step-up)
+// Discovery metadata — one resource + one issuer per integration path.
+// The issuer is https://host/<id>, so RFC 8414 puts its metadata at
+// /.well-known/oauth-authorization-server/<id> (path insertion).
 // ---------------------------------------------------------------------------
 
-export function protectedResourceMetadata(origin: string): Response {
+export function protectedResourceMetadata(origin: string, id: string): Response {
   return jsonResponse({
-    resource: `${origin}/mcp`,
-    authorization_servers: [origin],
+    resource: `${origin}/${id}/mcp`,
+    authorization_servers: [`${origin}/${id}`],
     bearer_methods_supported: ["header"],
-    resource_name: "zero-trust-mcp",
+    resource_name: `zero-trust-mcp: ${id}`,
   });
 }
 
-export function authorizationServerMetadata(origin: string): Response {
+export function authorizationServerMetadata(origin: string, id: string): Response {
   return jsonResponse({
-    issuer: origin,
-    authorization_endpoint: `${origin}/authorize`,
-    token_endpoint: `${origin}/token`,
-    registration_endpoint: `${origin}/register`,
+    issuer: `${origin}/${id}`,
+    authorization_endpoint: `${origin}/${id}/authorize`,
+    token_endpoint: `${origin}/${id}/token`,
+    registration_endpoint: `${origin}/${id}/register`,
     response_types_supported: ["code"],
     response_modes_supported: ["query"],
     grant_types_supported: ["authorization_code", "refresh_token"],
@@ -173,7 +154,8 @@ export function authorizationServerMetadata(origin: string): Response {
 }
 
 // ---------------------------------------------------------------------------
-// Dynamic client registration
+// Dynamic client registration (RFC 7591) — the registered redirect_uris are
+// sealed INTO the client_id itself.
 // ---------------------------------------------------------------------------
 
 export async function handleRegister(request: Request, sealKey: string): Promise<Response> {
@@ -202,190 +184,137 @@ export async function handleRegister(request: Request, sealKey: string): Promise
 }
 
 // ---------------------------------------------------------------------------
-// /authorize — the multi-step wizard
+// /<id>/authorize
 // ---------------------------------------------------------------------------
 
-export async function handleAuthorizeGet(
-  request: Request,
-  integrations: Record<string, Integration>,
-  env: Env,
-): Promise<Response> {
+export async function handleAuthorizeGet(request: Request, integration: Integration, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const params = url.searchParams;
 
-  const clientId = params.get("client_id") ?? "";
-  const redirectUri = params.get("redirect_uri") ?? "";
-  const codeChallenge = params.get("code_challenge") ?? "";
   if ((params.get("response_type") ?? "code") !== "code") {
     return oauthError("unsupported_response_type", "Only response_type=code is supported");
   }
+  const codeChallenge = params.get("code_challenge") ?? "";
   if (!codeChallenge || (params.get("code_challenge_method") ?? "S256") !== "S256") {
     return oauthError("invalid_request", "PKCE with S256 code_challenge is required");
   }
-  const client = await unseal<ClientPayload>(clientId, env.SEAL_KEY);
+  const client = await unseal<ClientPayload>(params.get("client_id") ?? "", env.SEAL_KEY);
   if (!client || client.t !== "client") {
-    return oauthError("invalid_client", "Unknown client_id — register first at /register", 401);
+    return oauthError("invalid_client", "Unknown client_id — register first", 401);
   }
+  const redirectUri = params.get("redirect_uri") ?? "";
   if (!redirectUriAllowed(redirectUri, client.ru)) {
     return oauthError("invalid_request", "redirect_uri does not match any registered redirect URI");
   }
 
-  const scopes = (params.get("scope") ?? "")
-    .split(/[\s+]+/)
-    .filter((s) => s in integrations);
-
-  const wiz: WizardPayload = {
-    t: "wiz",
-    scopes,
-    collected: {},
-    ru: redirectUri,
-    st: params.get("state") ?? "",
-    cc: codeChallenge,
-    exp: nowSeconds() + WIZARD_TTL,
-  };
-  return advanceWizard(wiz, request, integrations, env, url.origin);
-}
-
-/**
- * Drive the wizard forward: fast-pass every remaining integration whose grant
- * is in the browser cookie, stop at the first one that needs the user
- * (password form or upstream redirect), finish with code + Set-Cookie.
- */
-async function advanceWizard(
-  wiz: WizardPayload,
-  request: Request,
-  integrations: Record<string, Integration>,
-  env: Env,
-  origin: string,
-): Promise<Response> {
-  if (wiz.exp < nowSeconds()) return oauthError("invalid_request", "Authorization session expired — restart the flow");
-  const cookieGrants = await readGrantCookie(request, env.SEAL_KEY);
-
-  for (const id of wiz.scopes) {
-    if (wiz.collected[id]) continue;
-    const integration = integrations[id];
-
-    if (cookieGrants[id] !== undefined) {
-      try {
-        const r = await integration.refreshGrant(cookieGrants[id], env);
-        wiz.collected[id] = { grant: r.grant, s: r.session, exp: nowSeconds() + r.expiresInSeconds };
-        continue; // fast-passed, no user interaction
-      } catch {
-        // stale cookie grant — fall through to the interactive step
-      }
-    }
-
-    const sealedWiz = await seal(wiz, env.SEAL_KEY);
-    const step: WizardStepInfo = {
-      position: Object.keys(wiz.collected).length + 1,
-      total: wiz.scopes.length,
-    };
-    if (integration.kind === "password") {
-      return htmlResponse(loginPage(integration, sealedWiz, step));
-    }
-    // OAuth integration: bounce out to the provider, wizard state rides in `state`.
-    return Response.redirect(integration.authorizeUrl(`${origin}/callback/${id}`, sealedWiz, env), 302);
-  }
-
-  // All requested integrations collected (possibly zero) — mint the code.
-  const code = await seal(
-    { t: "code", scopes: wiz.scopes, bundle: wiz.collected, cc: wiz.cc, ru: wiz.ru, exp: nowSeconds() + AUTH_CODE_TTL } satisfies CodePayload,
+  const state = await seal(
+    {
+      t: "state",
+      i: integration.id,
+      ru: redirectUri,
+      st: params.get("state") ?? "",
+      cc: codeChallenge,
+      exp: nowSeconds() + AUTHORIZE_STATE_TTL,
+    } satisfies StatePayload,
     env.SEAL_KEY,
   );
-  const redirect = new URL(wiz.ru);
-  redirect.searchParams.set("code", code);
-  if (wiz.st) redirect.searchParams.set("state", wiz.st);
 
-  const headers = new Headers({ Location: redirect.toString() });
-  if (Object.keys(wiz.collected).length > 0) {
-    const merged = { ...cookieGrants };
-    for (const [id, state] of Object.entries(wiz.collected)) merged[id] = state.grant;
-    headers.set("Set-Cookie", await grantCookieHeader(merged, env.SEAL_KEY));
+  if (integration.kind === "password") {
+    return htmlResponse(loginPage(integration, state));
   }
-  return new Response(null, { status: 302, headers });
+  // OAuth integration: hand off to the upstream provider; our sealed state
+  // rides through its `state` parameter.
+  return Response.redirect(integration.authorizeUrl(`${new URL(request.url).origin}/${integration.id}/callback`, state, env), 302);
 }
 
-/** POST /authorize — a password integration's login form submission. */
-export async function handleAuthorizePost(
-  request: Request,
-  integrations: Record<string, Integration>,
-  env: Env,
+async function unsealState(raw: string, integration: Integration, sealKey: string): Promise<StatePayload | null> {
+  const state = await unseal<StatePayload>(raw, sealKey);
+  if (!state || state.t !== "state" || state.i !== integration.id || state.exp < nowSeconds()) return null;
+  return state;
+}
+
+/** Redirect back to the MCP client with a sealed authorization code. */
+async function finishAuthorize(
+  state: StatePayload,
+  result: { session: unknown; expiresInSeconds: number; grant: unknown },
+  sealKey: string,
 ): Promise<Response> {
+  const code = await seal(
+    {
+      t: "code",
+      i: state.i,
+      s: result.session,
+      se: nowSeconds() + result.expiresInSeconds,
+      grant: result.grant,
+      cc: state.cc,
+      ru: state.ru,
+      exp: nowSeconds() + AUTH_CODE_TTL,
+    } satisfies CodePayload,
+    sealKey,
+  );
+  const redirect = new URL(state.ru);
+  redirect.searchParams.set("code", code);
+  if (state.st) redirect.searchParams.set("state", state.st);
+  return Response.redirect(redirect.toString(), 302);
+}
+
+/** POST /<id>/authorize — password login form submission. */
+export async function handleAuthorizePost(request: Request, integration: Integration, env: Env): Promise<Response> {
+  if (integration.kind !== "password") return oauthError("invalid_request", "Unexpected form submission");
   const form = await request.formData();
-  const wiz = await unseal<WizardPayload>(String(form.get("wiz") ?? ""), env.SEAL_KEY);
-  if (!wiz || wiz.t !== "wiz") return oauthError("invalid_request", "Invalid or expired authorization session");
-  if (wiz.exp < nowSeconds()) return oauthError("invalid_request", "Authorization session expired — restart the flow");
-
-  const id = String(form.get("integration") ?? "");
-  const integration = integrations[id];
-  if (!integration || integration.kind !== "password" || !wiz.scopes.includes(id) || wiz.collected[id]) {
-    return oauthError("invalid_request", "Unexpected wizard step");
-  }
-
-  const sealedWiz = await seal(wiz, env.SEAL_KEY);
-  const step: WizardStepInfo = { position: Object.keys(wiz.collected).length + 1, total: wiz.scopes.length };
+  const state = await unsealState(String(form.get("state") ?? ""), integration, env.SEAL_KEY);
+  if (!state) return oauthError("invalid_request", "Invalid or expired authorization session — restart the flow");
+  const sealedState = String(form.get("state"));
 
   const creds: Record<string, string> = {};
   for (const field of (integration as PasswordIntegration).fields) {
     const value = form.get(field.name);
     if (typeof value !== "string" || !value) {
-      return htmlResponse(loginPage(integration, sealedWiz, step, `Please fill in ${field.label}`), 400);
+      return htmlResponse(loginPage(integration, sealedState, `Please fill in ${field.label}`), 400);
     }
     creds[field.name] = value;
   }
 
   try {
-    const r = await (integration as PasswordIntegration).login(creds, env);
-    wiz.collected[id] = { grant: r.grant, s: r.session, exp: nowSeconds() + r.expiresInSeconds };
+    // A REAL upstream login happens here — bad credentials never mint a code.
+    const result = await (integration as PasswordIntegration).login(creds, env);
+    return finishAuthorize(state, result, env.SEAL_KEY);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Login failed";
-    return htmlResponse(loginPage(integration, sealedWiz, step, message), 401);
+    return htmlResponse(loginPage(integration, sealedState, message), 401);
   }
-  return advanceWizard(wiz, request, integrations, env, new URL(request.url).origin);
 }
 
-/** GET /callback/<id> — an OAuth integration's provider sent the user back. */
-export async function handleUpstreamCallback(
-  request: Request,
-  integrationId: string,
-  integrations: Record<string, Integration>,
-  env: Env,
-): Promise<Response> {
+/** GET /<id>/callback — the upstream OAuth provider sent the user back. */
+export async function handleUpstreamCallback(request: Request, integration: Integration, env: Env): Promise<Response> {
+  if (integration.kind !== "oauth") return oauthError("invalid_request", "Integration has no upstream callback");
   const url = new URL(request.url);
-  const wiz = await unseal<WizardPayload>(url.searchParams.get("state") ?? "", env.SEAL_KEY);
-  if (!wiz || wiz.t !== "wiz") return oauthError("invalid_request", "Invalid or expired authorization session");
-
-  const integration = integrations[integrationId];
-  if (!integration || integration.kind !== "oauth" || !wiz.scopes.includes(integrationId) || wiz.collected[integrationId]) {
-    return oauthError("invalid_request", "Unexpected wizard step");
-  }
+  const state = await unsealState(url.searchParams.get("state") ?? "", integration, env.SEAL_KEY);
+  if (!state) return oauthError("invalid_request", "Invalid or expired authorization session — restart the flow");
   const code = url.searchParams.get("code");
   if (!code) return oauthError("access_denied", `${integration.name} did not return a code`);
 
   try {
-    const r = await integration.exchangeCode(code, `${url.origin}/callback/${integrationId}`, env);
-    wiz.collected[integrationId] = { grant: r.grant, s: r.session, exp: nowSeconds() + r.expiresInSeconds };
+    const result = await integration.exchangeCode(code, `${url.origin}/${integration.id}/callback`, env);
+    return finishAuthorize(state, result, env.SEAL_KEY);
   } catch (error) {
     return oauthError("invalid_request", `Upstream exchange failed: ${error instanceof Error ? error.message : error}`);
   }
-  return advanceWizard(wiz, request, integrations, env, url.origin);
 }
 
 // ---------------------------------------------------------------------------
-// /token
+// /<id>/token
 // ---------------------------------------------------------------------------
 
-export async function handleToken(
-  request: Request,
-  integrations: Record<string, Integration>,
-  env: Env,
-): Promise<Response> {
+export async function handleToken(request: Request, integration: Integration, env: Env): Promise<Response> {
   const form = new URLSearchParams(await request.text());
   const grantType = form.get("grant_type");
 
   if (grantType === "authorization_code") {
     const code = await unseal<CodePayload>(form.get("code") ?? "", env.SEAL_KEY);
-    if (!code || code.t !== "code") return oauthError("invalid_grant", "Invalid authorization code");
+    if (!code || code.t !== "code" || code.i !== integration.id) {
+      return oauthError("invalid_grant", "Invalid authorization code");
+    }
     if (code.exp < nowSeconds()) return oauthError("invalid_grant", "Authorization code expired");
 
     const verifier = form.get("code_verifier") ?? "";
@@ -396,108 +325,67 @@ export async function handleToken(
     if (redirectUri && redirectUri !== code.ru) {
       return oauthError("invalid_grant", "redirect_uri does not match authorization request");
     }
-    return issueTokens(code.scopes, code.bundle, env.SEAL_KEY);
+    return issueTokens(integration.id, code.s, code.se - nowSeconds(), code.grant, env.SEAL_KEY);
   }
 
   if (grantType === "refresh_token") {
     const refresh = await unseal<RefreshPayload>(form.get("refresh_token") ?? "", env.SEAL_KEY);
-    if (!refresh || refresh.t !== "refresh") return oauthError("invalid_grant", "Invalid refresh token");
-
-    // Snapshot refresh: only re-contact upstreams whose session is (nearly)
-    // expired; carry still-valid sessions forward. A single failing upstream
-    // degrades that integration (err flag) instead of killing the bundle.
-    const bundle: Record<string, IntegrationState> = {};
-    const now = nowSeconds();
-    for (const id of refresh.scopes) {
-      const entry = refresh.integ[id];
-      const integration = integrations[id];
-      if (!entry || !integration) continue;
-      if (!entry.err && entry.exp - now > SESSION_REUSE_MARGIN) {
-        bundle[id] = entry;
-        continue;
-      }
-      try {
-        const r = await integration.refreshGrant(entry.grant, env);
-        bundle[id] = { grant: r.grant, s: r.session, exp: now + r.expiresInSeconds };
-      } catch (error) {
-        bundle[id] = {
-          grant: entry.grant,
-          s: null,
-          exp: now + 300, // retry on a later refresh; keeps the grant material
-          err: error instanceof Error ? error.message : "upstream refresh failed",
-        };
-      }
+    if (!refresh || refresh.t !== "refresh" || refresh.i !== integration.id) {
+      return oauthError("invalid_grant", "Invalid refresh token");
     }
-    return issueTokens(refresh.scopes, bundle, env.SEAL_KEY);
+    try {
+      // Stateless refresh: re-establish the upstream session from the sealed
+      // grant (re-login for password integrations, upstream refresh-token
+      // grant for OAuth ones).
+      const r = await integration.refreshGrant(refresh.grant, env);
+      return issueTokens(integration.id, r.session, r.expiresInSeconds, r.grant, env.SEAL_KEY);
+    } catch {
+      // The grant is dead (revoked, password changed). invalid_grant makes a
+      // spec-compliant client discard its tokens and re-run the interactive
+      // authorization flow — that is the recovery path.
+      return oauthError("invalid_grant", "Upstream re-authentication failed; please re-authorize");
+    }
   }
 
   return oauthError("unsupported_grant_type", "Use authorization_code or refresh_token");
 }
 
 async function issueTokens(
-  scopes: string[],
-  bundle: Record<string, IntegrationState>,
+  integrationId: string,
+  session: unknown,
+  expiresInSeconds: number,
+  grant: unknown,
   sealKey: string,
 ): Promise<Response> {
-  const now = nowSeconds();
-  const entries = Object.values(bundle);
-  const minExp = entries.length
-    ? Math.min(...entries.map((e) => e.exp), now + MAX_ACCESS_TTL)
-    : now + EMPTY_BUNDLE_TTL;
-
-  const integ: AccessPayload["integ"] = {};
-  for (const [id, e] of Object.entries(bundle)) integ[id] = { s: e.s, exp: e.exp, err: e.err };
-
-  const accessToken = await seal({ t: "access", scopes, integ, exp: minExp } satisfies AccessPayload, sealKey);
-  const refreshToken = await seal({ t: "refresh", scopes, integ: bundle } satisfies RefreshPayload, sealKey);
+  const ttl = Math.min(Math.max(expiresInSeconds, 60), MAX_ACCESS_TTL);
+  const accessToken = await seal(
+    { t: "access", i: integrationId, s: session, exp: nowSeconds() + ttl } satisfies AccessPayload,
+    sealKey,
+  );
+  const refreshToken = await seal({ t: "refresh", i: integrationId, grant } satisfies RefreshPayload, sealKey);
   return jsonResponse(
-    {
-      access_token: accessToken,
-      token_type: "bearer",
-      expires_in: Math.max(minExp - now, 60),
-      refresh_token: refreshToken,
-      scope: scopes.join(" "),
-    },
+    { access_token: accessToken, token_type: "bearer", expires_in: ttl, refresh_token: refreshToken },
     200,
     { "Cache-Control": "no-store" }, // RFC 6749 §5.1
   );
 }
 
 // ---------------------------------------------------------------------------
-// Bearer verification + step-up for /mcp
+// Bearer verification for /<id>/mcp
 // ---------------------------------------------------------------------------
 
-export async function verifyAccessToken(request: Request, sealKey: string): Promise<AccessPayload | null> {
+export async function verifyAccessToken(request: Request, integrationId: string, sealKey: string): Promise<AccessPayload | null> {
   const header = request.headers.get("Authorization") ?? "";
   if (!header.toLowerCase().startsWith("bearer ")) return null;
   const payload = await unseal<AccessPayload>(header.slice(7).trim(), sealKey);
-  if (!payload || payload.t !== "access" || payload.exp < nowSeconds()) return null;
+  // `i` is the audience: a token sealed for /waitrose is garbage at /demo.
+  if (!payload || payload.t !== "access" || payload.i !== integrationId || payload.exp < nowSeconds()) return null;
   return payload;
 }
 
-/** RFC 6750 bearer challenge: 401 invalid_token or 403 insufficient_scope. */
-function bearerChallenge(origin: string, status: 401 | 403, error: string, description: string, scope?: string): Response {
-  const attrs = [
-    `error="${error}"`,
-    `error_description="${description}"`,
-    ...(scope !== undefined ? [`scope="${scope}"`] : []),
-    `resource_metadata="${origin}/.well-known/oauth-protected-resource"`,
-  ];
-  return jsonResponse({ error, error_description: description, ...(scope !== undefined && { scope }) }, status, {
-    "WWW-Authenticate": `Bearer ${attrs.join(", ")}`,
+export function unauthorized(origin: string, integrationId: string, description = "Missing or invalid access token"): Response {
+  const resourceMetadata = `${origin}/.well-known/oauth-protected-resource/${integrationId}/mcp`;
+  return jsonResponse({ error: "invalid_token", error_description: description }, 401, {
+    "WWW-Authenticate": `Bearer error="invalid_token", error_description="${description}", resource_metadata="${resourceMetadata}"`,
   });
-}
-
-export function unauthorized(origin: string, description = "Missing or invalid access token"): Response {
-  return bearerChallenge(origin, 401, "invalid_token", description);
-}
-
-/**
- * SEP-2350 scope step-up: tell the client the granted scope is insufficient
- * and which scope set to re-authorize with. Compliant clients re-run the
- * authorization flow (where the sealed cookie fast-passes everything already
- * connected) and retry the request with the new token.
- */
-export function insufficientScope(origin: string, scopes: string[], description: string): Response {
-  return bearerChallenge(origin, 403, "insufficient_scope", description, scopes.join(" "));
 }

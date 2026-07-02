@@ -59,9 +59,9 @@ export const waitrose: PasswordIntegration = {
     const client = clientFromSession(session as WaitroseSession);
 
     server.registerTool(
-      "waitrose_search_products",
+      "search_products",
       {
-        description: "Search the Waitrose product catalogue by text query. Returns product names, prices and line numbers (use line numbers with waitrose_add_to_trolley).",
+        description: "Search the Waitrose product catalogue by text query. Returns product names, prices and line numbers (use line numbers with add_to_trolley).",
         inputSchema: z.object({
           query: z.string().describe("Search term, e.g. 'organic milk'"),
           size: z.number().int().min(1).max(48).optional().describe("Max results (default 10)"),
@@ -84,7 +84,7 @@ export const waitrose: PasswordIntegration = {
     );
 
     server.registerTool(
-      "waitrose_get_trolley",
+      "get_trolley",
       { description: "Get the current Waitrose trolley (shopping cart): items, quantities and totals." },
       async () => {
         const t = await client.getTrolley();
@@ -102,9 +102,9 @@ export const waitrose: PasswordIntegration = {
     );
 
     server.registerTool(
-      "waitrose_add_to_trolley",
+      "add_to_trolley",
       {
-        description: "Add a product to the Waitrose trolley by line number (find line numbers via waitrose_search_products).",
+        description: "Add a product to the Waitrose trolley by line number (find line numbers via search_products).",
         inputSchema: z.object({
           lineNumber: z.string().describe("Product line number"),
           quantity: z.number().int().min(1).max(99).optional().describe("Quantity (default 1)"),
@@ -122,7 +122,7 @@ export const waitrose: PasswordIntegration = {
     );
 
     server.registerTool(
-      "waitrose_remove_from_trolley",
+      "remove_from_trolley",
       {
         description: "Remove a product from the Waitrose trolley by line number.",
         inputSchema: z.object({ lineNumber: z.string() }),
@@ -138,7 +138,7 @@ export const waitrose: PasswordIntegration = {
     );
 
     server.registerTool(
-      "waitrose_get_orders",
+      "get_orders",
       { description: "List pending and previous Waitrose orders." },
       async () => {
         const { pending, previous } = await client.getOrders(5);
@@ -154,7 +154,7 @@ export const waitrose: PasswordIntegration = {
     );
 
     server.registerTool(
-      "waitrose_get_account_info",
+      "get_account_info",
       { description: "Get the logged-in Waitrose account profile (email, address, memberships)." },
       async () => {
         const { profile, memberships } = await client.getAccountInfo();
