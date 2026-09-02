@@ -4,6 +4,7 @@ import {
   authorizationServerMetadata,
   handleAuthorizeGet,
   handleAuthorizePost,
+  handleComplete,
   handleRegister,
   handleToken,
   handleUpstreamCallback,
@@ -15,6 +16,9 @@ import { indexPage } from "./html.js";
 import type { Env, Integration } from "./integrations/types.js";
 import { waitrose } from "./integrations/waitrose/index.js";
 import { demo } from "./integrations/demo/index.js";
+import { monzo } from "./integrations/monzo/index.js";
+
+export { MonzoRefreshCoordinator } from "./integrations/monzo/coordinator.js";
 
 // The whole "folder full of integrations" idea: one entry here, one folder
 // under src/integrations/, and the worker serves it at /<id>/mcp with a
@@ -22,6 +26,7 @@ import { demo } from "./integrations/demo/index.js";
 const integrations: Record<string, Integration> = {
   [waitrose.id]: waitrose,
   [demo.id]: demo,
+  [monzo.id]: monzo,
 };
 
 // One handler at module scope; the factory runs per request and registers
@@ -65,6 +70,7 @@ export default {
       if (second === "authorize" && request.method === "GET") return handleAuthorizeGet(request, integration, env);
       if (second === "authorize" && request.method === "POST") return handleAuthorizePost(request, integration, env);
       if (second === "callback" && request.method === "GET") return handleUpstreamCallback(request, integration, env);
+      if (second === "complete" && request.method === "POST") return handleComplete(request, integration, env);
       if (second === "token" && request.method === "POST") return handleToken(request, integration, env);
 
       if (second === "mcp") {
@@ -86,7 +92,7 @@ export default {
     }
 
     if (pathname === "/") {
-      return new Response(indexPage(origin, Object.keys(integrations)), {
+      return new Response(indexPage(origin, Object.values(integrations)), {
         headers: { "Content-Type": "text/html; charset=utf-8" },
       });
     }

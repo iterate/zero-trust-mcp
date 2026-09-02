@@ -3,11 +3,20 @@
   "name": "zero-trust-mcp",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-01",
-  // Lets this worker fetch other workers.dev URLs on the SAME account over
-  // the public channel (otherwise CF blocks same-account fetches, error 1042).
+  // The demo provider is another workers.dev Worker on this account.
   "compatibility_flags": ["global_fetch_strictly_public"],
-  "observability": { "enabled": true },
-  "vars": { "DEMO_PROVIDER_URL": "https://dummy-oauth-provider.templestein.workers.dev" }
-  // Deliberately no bindings: the whole point is statelessness.
-  // The only configuration is the SEAL_KEY secret (wrangler secret put SEAL_KEY).
+  // Request logs can retain bearer tokens and sealed OAuth state. They are
+  // disabled so the operator cannot accumulate client-held capabilities.
+  "observability": { "enabled": false },
+  "vars": { "DEMO_PROVIDER_URL": "https://dummy-oauth-provider.templestein.workers.dev" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "MONZO_REFRESH_COORDINATOR", "class_name": "MonzoRefreshCoordinator" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MonzoRefreshCoordinator"] }
+  ]
+  // The coordinator persists only { generation, SHA-256(refresh_token) }.
+  // The only secret configuration remains SEAL_KEY.
 }

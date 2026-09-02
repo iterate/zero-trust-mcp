@@ -3,6 +3,11 @@ import type { McpServer } from "@modelcontextprotocol/server";
 export interface Env {
   SEAL_KEY: string;
   DEMO_PROVIDER_URL: string;
+  MONZO_REFRESH_COORDINATOR: DurableObjectNamespace;
+  /** Test override; production defaults to https://api.monzo.com. */
+  MONZO_API_ORIGIN?: string;
+  /** Test override; production defaults to https://auth.monzo.com. */
+  MONZO_AUTH_ORIGIN?: string;
 }
 
 export interface CredentialField {
@@ -24,9 +29,63 @@ export interface GrantResult {
   grant: unknown;
 }
 
+/** Declarative provider identity used by the shared setup/completion pages. */
+export interface IntegrationPresentation {
+  /** Trusted, source-controlled SVG markup. Never populate this from user input. */
+  logoSvg?: string;
+  wordmark?: string;
+  productLabel?: string;
+  setupDescription?: string;
+  securitySummary?: string;
+  /** Provider-specific independence/trademark notice shown on connection surfaces. */
+  affiliationNotice?: string;
+  setupGuide?: {
+    title: string;
+    description: string;
+    actionLabel: string;
+    actionUrl: string;
+    steps: Array<{
+      title: string;
+      description: string;
+      settings?: Array<{
+        label: string;
+        /** Supports {origin} and {id}, resolved by the catalogue page. */
+        value: string;
+        copy?: boolean;
+      }>;
+    }>;
+  };
+  colors?: {
+    background: string;
+    ink: string;
+    accent: string;
+    accentInk: string;
+    subtle: string;
+  };
+}
+
+/**
+ * Optional post-OAuth lifecycle for providers whose token is not usable until
+ * a separate approval step completes. The OAuth engine owns all state and UI;
+ * an integration only declares copy and a readiness probe.
+ */
+export interface ConnectionFlow {
+  instructionTitle: string;
+  instructionDescription: string;
+  pendingTitle: string;
+  pendingDescription: string;
+  readyTitle: string;
+  readyDescription: string;
+  checkLabel: string;
+  returnLabel: string;
+  check(session: unknown, env: Env): Promise<"pending" | "ready">;
+}
+
 interface IntegrationBase {
   id: string;
   name: string;
+  presentation?: IntegrationPresentation;
+  connectionFlow?: ConnectionFlow;
   /** Register this integration's tools (named `<id>_*`) bound to an unsealed session. */
   registerTools(server: McpServer, session: unknown): void;
   /** Mint a fresh session from grant material (refresh grant, cookie fast-pass). Throws if the grant is dead. */
@@ -47,4 +106,25 @@ export interface OAuthIntegration extends IntegrationBase {
   exchangeCode(code: string, callbackUrl: string, env: Env): Promise<GrantResult>;
 }
 
-export type Integration = PasswordIntegration | OAuthIntegration;
+/**
+ * OAuth provider where every user supplies their own confidential client.
+ * The credentials travel only in client-held sealed protocol artifacts.
+ */
+export interface UserClientOAuthIntegration extends IntegrationBase {
+  kind: "user-client-oauth";
+  fields: CredentialField[];
+  authorizeUrl(
+    callbackUrl: string,
+    state: string,
+    credentials: Record<string, string>,
+    env: Env,
+  ): string;
+  exchangeCode(
+    code: string,
+    callbackUrl: string,
+    credentials: Record<string, string>,
+    env: Env,
+  ): Promise<GrantResult>;
+}
+
+export type Integration = PasswordIntegration | OAuthIntegration | UserClientOAuthIntegration;

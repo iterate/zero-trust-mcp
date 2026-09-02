@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
+import WaitroseClient from "waitrose";
 import type { Env, GrantResult, PasswordIntegration } from "../types.js";
-import WaitroseClient from "./client.js";
 
 export interface WaitroseSession {
   accessToken: string;
@@ -21,6 +21,15 @@ function clientFromSession(session: WaitroseSession): WaitroseClient {
     defaultBranchId: session.defaultBranchId,
   });
   return client;
+}
+
+/**
+ * waitrose@1.2.1 adds the account's branch ID to catalogue searches, but the
+ * current upstream API returns no results when that field is present. Keep the
+ * authenticated catalogue client branchless until the package fix is released.
+ */
+function catalogClientFromSession(session: WaitroseSession): WaitroseClient {
+  return clientFromSession({ ...session, defaultBranchId: "" });
 }
 
 function json(data: unknown) {
@@ -47,6 +56,9 @@ export const waitrose: PasswordIntegration = {
   id: "waitrose",
   name: "Waitrose",
   kind: "password",
+  presentation: {
+    affiliationNotice: "Independent software. Not affiliated with or endorsed by Waitrose & Partners.",
+  },
   fields: [
     { name: "username", label: "Email", type: "email" },
     { name: "password", label: "Password", type: "password" },
@@ -56,7 +68,9 @@ export const waitrose: PasswordIntegration = {
   refreshGrant: (grant: unknown, _env: Env) => login(grant as Record<string, string>),
 
   registerTools(server: McpServer, session: unknown) {
-    const client = clientFromSession(session as WaitroseSession);
+    const waitroseSession = session as WaitroseSession;
+    const client = clientFromSession(waitroseSession);
+    const catalogClient = catalogClientFromSession(waitroseSession);
 
     server.registerTool(
       "search_products",
@@ -68,7 +82,7 @@ export const waitrose: PasswordIntegration = {
         }),
       },
       async ({ query, size }) => {
-        const results = await client.searchProducts(query, { size: size ?? 10 });
+        const results = await catalogClient.searchProducts(query, { size: size ?? 10 });
         return json({
           totalMatches: results.totalMatches,
           products: results.products.map((p) => ({
@@ -139,17 +153,58 @@ export const waitrose: PasswordIntegration = {
 
     server.registerTool(
       "get_orders",
-      { description: "List pending and previous Waitrose orders." },
-      async () => {
-        const { pending, previous } = await client.getOrders(5);
+      {
+        description: "List pending and previous Waitrose orders. Use get_order with an order ID to retrieve its items.",
+        inputSchema: z.object({
+          limit: z.number().int().min(1).max(15).optional().describe("Max orders per category (default 5)"),
+        }),
+      },
+      async ({ limit }) => {
+        const { pending, previous } = await client.getOrders(limit ?? 5);
         const brief = (orders: typeof pending) =>
           orders.map((o) => ({
             id: o.customerOrderId,
             status: o.status,
-            total: o.totals?.estimated?.totalPrice,
+            created: o.created,
+            updated: o.lastUpdated,
+            total: o.totals?.actual?.paid ?? o.totals?.estimated?.totalPrice,
             slot: o.slots?.[0] && { type: o.slots[0].type, start: o.slots[0].startDateTime },
           }));
         return json({ pending: brief(pending), previous: brief(previous) });
+      },
+    );
+
+    server.registerTool(
+      "get_order",
+      {
+        description: "Get a Waitrose order's full details, including product names, quantities and prices.",
+        inputSchema: z.object({
+          orderId: z.string().min(1).describe("Order ID returned by get_orders"),
+        }),
+      },
+      async ({ orderId }) => {
+        const order = await client.getOrder(orderId);
+        const lineNumbers = [...new Set(order.orderLines.map((line) => line.lineNumber))];
+        const products = await client.getProductsByLineNumbers(lineNumbers);
+        const productsByLine = new Map(products.map((product) => [product.lineNumber, product]));
+
+        return json({
+          id: order.customerOrderId,
+          status: order.status,
+          created: order.created,
+          updated: order.lastUpdated,
+          slot: order.slots?.[0],
+          items: order.orderLines.map((line) => ({
+            lineNumber: line.lineNumber,
+            name: productsByLine.get(line.lineNumber)?.name ?? null,
+            status: line.orderLineStatus,
+            quantity: line.quantity ?? line.estimatedQuantity,
+            unitPrice: line.unitPrice ?? line.estimatedUnitPrice,
+            totalPrice: line.totalPrice ?? line.estimatedTotalPrice,
+            substitutionAllowed: line.substitutionAllowed,
+          })),
+          totals: order.totals,
+        });
       },
     );
 

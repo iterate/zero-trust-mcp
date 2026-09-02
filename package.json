@@ -1,16 +1,21 @@
 {
   "name": "zero-trust-mcp",
-  "description": "A fully stateless remote MCP server: upstream credentials live AES-sealed inside the OAuth tokens the MCP client holds",
+  "description": "A remote MCP server with no persisted third-party credentials or user data",
   "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "test:waitrose:live": "bun test/waitrose-live.ts",
+    "test:monzo:live": "bun test/monzo-live.ts",
+    "test:monzo": "bun test/monzo-concurrency.ts",
+    "test:site": "bun test/index-page.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0-beta.1",
+    "waitrose": "1.2.1",
     "zod": "^4.2.0"
   },
   "devDependencies": {

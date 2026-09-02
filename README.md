@@ -1,12 +1,13 @@
 # zero-trust-mcp
 
-**A remote MCP server that stores nothing.** No database, no KV, no sessions — the credentials for every third-party integration live AES-256-GCM-sealed *inside the OAuth tokens the MCP client itself holds*. The server's only configuration is one 32-byte key.
+**A remote MCP server that stores no third-party credentials or user data.** Credentials live AES-256-GCM-sealed *inside the OAuth tokens the MCP client itself holds*. Monzo adds a tiny refresh coordinator whose only durable values are a generation number and one-way token hash—state that cannot call Monzo.
 
 Each integration gets its own path with a complete, standalone OAuth 2.1 lifecycle:
 
 ```
 https://<worker>/waitrose/mcp     ← real grocery API, username/password upstream
-https://<worker>/demo/mcp         ← fake OAuth provider (second worker), OAuth upstream
+https://<worker>/demo/mcp         ← runnable fake OAuth provider
+https://<worker>/monzo/mcp        ← real Monzo API, user-supplied OAuth client
 ```
 
 Connecting with the real Claude CLI just works:
@@ -23,32 +24,44 @@ waitrose: https://<worker>/waitrose/mcp (HTTP) - ✔ Connected
   ⎿ Duchy Organic Chicken Breast Fillets, Yeo Valley Whole Milk, … total £47.30
 ```
 
-Built on Cloudflare Workers with the [MCP TypeScript SDK v2 beta](https://github.com/modelcontextprotocol/typescript-sdk). The Waitrose client is vendored verbatim from [jonastemplestein/waitrose](https://github.com/jonastemplestein/waitrose).
+To launch Claude with **only Monzo** for one session, without loading any of
+your other configured MCP servers:
+
+```sh
+claude --strict-mcp-config \
+  --mcp-config '{"mcpServers":{"monzo":{"type":"http","url":"https://zero-trust-mcp.templestein.workers.dev/monzo/mcp"}}}'
+```
+
+Claude opens the OAuth flow when the server first authenticates. The Monzo
+handoff page waits for in-app approval, confirms that `/accounts` is usable,
+then gives one clear **Return to your MCP client** button.
+
+Built on Cloudflare Workers with the [MCP TypeScript SDK v2 beta](https://github.com/modelcontextprotocol/typescript-sdk) and the [jonastemplestein/waitrose](https://github.com/jonastemplestein/waitrose) package.
 
 ## Why
 
 Remote MCP servers are becoming the way agents reach third-party APIs. The default architecture is uncomfortable: a hosted MCP server that proxies to upstream APIs normally keeps a **database of everyone's upstream credentials** — refresh tokens, sometimes passwords. That database is a breach magnet, an operational liability, and a trust problem ("why does this random connector service have my grocery password in its Postgres?").
 
-This project explores the other extreme: **the client is the database.** OAuth already forces MCP clients to hold an access token and a refresh token, send them back on every request, and replace them on every refresh. If those tokens are encrypted blobs *containing the upstream credentials*, the server needs zero storage — it unseals state from each request, acts on it, and hands back updated state at refresh time. The client can't read the blobs; the server can't act without being handed them. Neither side alone holds usable credentials. Hence: zero trust.
+This project explores the other extreme: **the client holds the capability.** OAuth already forces MCP clients to hold an access token and a refresh token, send them back on requests, and replace them on refresh. If those tokens are encrypted blobs *containing the upstream credentials*, the server can unseal state from each request, act on it, and hand back updated state without retaining a usable third-party capability. Monzo's hash-only coordinator prevents concurrent refresh races without retaining a credential.
 
 The crypto pattern is old and sound — it's how [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) seals sessions into cookies and how Rails encrypts session cookies — but as far as we could find, nobody had written it up for MCP.
 
 ## The architecture
 
-One worker serves every integration, but each integration path is an **independent authorization-server + resource-server pair**. There is no shared session, no shared grant, no coupling: a token sealed for `/waitrose` is cryptographically garbage at `/demo`.
+One worker serves every integration, but each integration path is an **independent authorization-server + resource-server pair**. There is no shared session, no shared grant, no coupling: a token sealed for `/waitrose` is cryptographically garbage at `/monzo`.
 
 ```mermaid
 flowchart LR
     subgraph Client["MCP client (Claude Code, claude.ai, Inspector)"]
         T1["waitrose connection:<br/>sealed access + refresh token"]
-        T2["demo connection:<br/>sealed access + refresh token"]
+        T2["monzo connection:<br/>sealed access + refresh token"]
     end
-    subgraph Worker["zero-trust-mcp · one Worker, zero bindings"]
+    subgraph Worker["zero-trust-mcp · one Worker"]
         W["/waitrose/mcp · /waitrose/authorize<br/>/waitrose/token · /waitrose/register"]
-        D["/demo/mcp · /demo/authorize<br/>/demo/token · /demo/callback …"]
+        D["/monzo/mcp · /monzo/authorize<br/>/monzo/token · /monzo/callback …"]
     end
     UP1["Waitrose API<br/><i>password login, 15-min tokens,<br/>no working refresh</i>"]
-    UP2["dummy-oauth-provider<br/><i>a second ~140-line worker:<br/>/authorize /token /api/me</i>"]
+    UP2["Monzo API<br/><i>user-owned confidential OAuth client</i>"]
 
     T1 -- "Bearer ⟨sealed blob⟩" --> W
     T2 -- "Bearer ⟨sealed blob⟩" --> D
@@ -64,6 +77,7 @@ Every artifact the server issues is the same construction: `base64url( version �
 |---|---|---|
 | `client_id` | the registered `redirect_uris` (stateless dynamic client registration) | ∞ |
 | authorize state | the validated OAuth params, riding through the login form (hidden field) or the upstream provider (`state` param) | 10 min |
+| connection handoff | the upstream session + grant, held in a sealed browser field while a provider-specific approval finishes | 10 min |
 | authorization code | upstream session + grant + PKCE challenge + redirect_uri | 2 min |
 | **access token** | the upstream *session* (what a request needs) | upstream's expiry |
 | **refresh token** | the durable *grant* (what can mint sessions): credentials for password integrations, the upstream refresh token for OAuth ones | ∞ |
@@ -94,7 +108,7 @@ sequenceDiagram
     S->>U: API call with unsealed session
 ```
 
-For an OAuth-style upstream (see the `demo` integration), steps 5–7 are replaced by a redirect to the provider's consent screen, with our sealed state riding through the provider's `state` parameter; the callback exchanges the provider's code server-side. Either way the *shape* the MCP client sees is identical.
+For an OAuth-style upstream such as Monzo, steps 5–7 are replaced by a redirect to the provider's consent screen, with our sealed state riding through the provider's `state` parameter; the callback exchanges the provider's code server-side. Either way the *shape* the MCP client sees is identical.
 
 ### The refresh / recovery lifecycle
 
@@ -135,18 +149,18 @@ src/
   index.ts               path router + per-request MCP server factory     (~120 lines)
   oauth.ts               the entire stateless authorization server        (~380 lines)
   seal.ts                AES-256-GCM seal/unseal                          (~70 lines)
-  html.ts                login page + index page
+  html.ts                shared provider-themed login + completion pages
   integrations/
-    types.ts             Integration interface (password | oauth kinds)
+    types.ts             Integration contract, presentation + completion hooks
     waitrose/
-      client.ts          vendored verbatim from jonastemplestein/waitrose
-      index.ts           login + 6 tools (search, trolley, orders, account)
-    demo/
-      index.ts           OAuth-kind integration, ~70 lines
+      index.ts           package adapter: login, catalogue, trolley, order details, account
+    monzo/
+      index.ts           OAuth adapter + tools
+      coordinator.ts     hash-only refresh serialization
 dummy-oauth/
-  src/index.ts           the fake provider: /authorize, /token, /api/me   (~140 lines)
+  src/index.ts           fake OAuth provider used by the runnable demo
 test/
-  journey.ts             scripted MCP client: both integrations, PKCE ± , refresh, audience binding
+  journey.ts             legacy fixture journey: PKCE, refresh, audience binding
   browser-proof.ts       drives the login page in headless Chrome via agent-browser
 ```
 
@@ -164,7 +178,28 @@ export const thing: PasswordIntegration = {
 };
 ```
 
-OAuth-style integrations swap `login`/`fields` for `authorizeUrl`/`exchangeCode` (see `src/integrations/demo`). Add it to the `integrations` map in `src/index.ts` and it's live at `/thing/mcp` with the complete OAuth lifecycle — discovery, registration, login page, refresh, recovery.
+OAuth-style integrations swap `login`/`fields` for `authorizeUrl`/`exchangeCode`. Add one to the `integrations` map in `src/index.ts` and it's live at `/thing/mcp` with the complete OAuth lifecycle — discovery, registration, login page, refresh, recovery.
+
+Monzo is the third supported shape: `user-client-oauth`. Each user supplies their own confidential upstream client during authorization. See [the verified design and threat model](docs/monzo-zero-trust-research.md).
+
+Provider UX is declarative too. An integration may provide `presentation`
+(logo, wordmark, colors, setup copy) and an optional `connectionFlow`:
+
+```ts
+connectionFlow: {
+  instructionTitle: "Approve in the provider app",
+  pendingTitle: "Still waiting",
+  readyTitle: "Provider is connected",
+  // remaining button/body copy omitted
+  check: async (session, env) => canReadData(session, env) ? "ready" : "pending",
+}
+```
+
+The shared OAuth engine seals the browser handoff, serves
+`/<provider>/complete`, polls readiness, renders pending/ready/error states,
+and returns the authorization code to the MCP client. Provider folders never
+implement those protocol or page mechanics. That keeps the extension unit to
+one adapter object and one registry entry even if the catalogue grows large.
 
 The `grant` is whatever your integration needs to mint future sessions: credentials for password APIs (like Waitrose, where refresh doesn't work), the upstream refresh token for OAuth APIs (like Gmail would be). It's sealed into the refresh token and never stored.
 
@@ -175,16 +210,16 @@ Prerequisites: [bun](https://bun.sh), a Cloudflare account, `wrangler` logged in
 ```sh
 bun install
 
-# each worker's only configuration: a 32-byte sealing key
+# each Worker's only secret configuration: a 32-byte sealing key
 openssl rand -base64 32 | bunx wrangler secret put SEAL_KEY -c dummy-oauth/wrangler.jsonc
 openssl rand -base64 32 | bunx wrangler secret put SEAL_KEY
 
-bunx wrangler deploy -c dummy-oauth/wrangler.jsonc     # note the URL it prints…
-# …put it in wrangler.jsonc's DEMO_PROVIDER_URL var, then:
+bunx wrangler deploy -c dummy-oauth/wrangler.jsonc
+# Put that URL in wrangler.jsonc as DEMO_PROVIDER_URL, then:
 bunx wrangler deploy
 ```
 
-For local dev put `SEAL_KEY=…` in `.dev.vars` (gitignored). Note the `global_fetch_strictly_public` compatibility flag in `wrangler.jsonc`: without it, Cloudflare blocks a worker fetching another worker's `workers.dev` URL on the same account (error 1042).
+For local dev put `SEAL_KEY=…` in `.dev.vars` (gitignored). The `global_fetch_strictly_public` compatibility flag lets the public Worker call the demo Worker when both use the same Cloudflare account.
 
 Prove everything against your deployment (the Waitrose leg needs a real login):
 
@@ -206,7 +241,9 @@ Implements the [MCP authorization spec (2025-06-18)](https://modelcontextprotoco
 ## Honest limitations (read before using for anything real)
 
 - **Authorization codes are not single-use.** With no storage there's nothing to burn a code against. Mitigations: 2-minute TTL + PKCE binding (a replayed code needs the same verifier).
-- **No revocation.** A sealed token is valid until it expires. Upstream revocation still propagates (refresh fails → `invalid_grant` → re-authorize), and rotating `SEAL_KEY` is a global kill-switch — which also logs out every user. Version the key (a version byte already exists in the blob format) for graceful rotation.
+- **No local revocation list.** A sealed access token is valid until it expires. Upstream revocation still propagates on API use or refresh, and rotating `SEAL_KEY` is a global kill-switch—which also logs out every user.
+- **Monzo refresh recovery is intentionally limited.** The hash-only coordinator prevents concurrent rotations but cannot recover a newly rotated refresh token if the successful response is lost. That case requires interactive OAuth again.
+- **A live Worker can see tokens in flight.** The design protects credentials at rest; it cannot protect against an actively malicious or compromised deployment serving the request.
 - **Sealed credentials live in client hands.** For password integrations, the user's password sits AES-sealed inside the refresh token in the MCP client's token store. The crypto is sound; your threat model must be comfortable with ciphertext-at-rest outside your infrastructure — and with `SEAL_KEY` being the one secret that matters. It *is* the database now; guard it accordingly.
 - **Password-kind integrations are a workaround, not a virtue.** Waitrose has no OAuth, so the login form is the only way in. For upstreams with real OAuth (Gmail, etc.) the oauth-kind integration keeps passwords out of the picture entirely — the sealed grant is just the upstream refresh token.
 - **The MCP SDK v2 is beta** (`2.0.0-beta.1`); stable is expected 2026-07-28 alongside the new spec revision.

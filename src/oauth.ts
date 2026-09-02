@@ -24,11 +24,18 @@
  */
 
 import { seal, unseal, sha256b64url, nowSeconds } from "./seal.js";
-import type { Env, Integration, PasswordIntegration } from "./integrations/types.js";
-import { loginPage } from "./html.js";
+import type {
+  Env,
+  GrantResult,
+  Integration,
+  PasswordIntegration,
+  UserClientOAuthIntegration,
+} from "./integrations/types.js";
+import { connectionPage, loginPage } from "./html.js";
 
 const AUTH_CODE_TTL = 120;
 const AUTHORIZE_STATE_TTL = 600;
+const CONNECTION_HANDOFF_TTL = 600;
 const MAX_ACCESS_TTL = 3600;
 
 // ---------------------------------------------------------------------------
@@ -47,6 +54,8 @@ interface StatePayload {
   ru: string; // client redirect_uri
   st: string; // client state
   cc: string; // PKCE challenge (S256)
+  /** User-supplied upstream OAuth client, present only after the setup POST. */
+  uc?: Record<string, string>;
   exp: number;
 }
 
@@ -74,6 +83,15 @@ interface RefreshPayload {
   grant: unknown;
 }
 
+/** Provider result held only by the browser while an extra approval completes. */
+interface HandoffPayload {
+  t: "handoff";
+  i: string;
+  state: StatePayload;
+  result: GrantResult;
+  exp: number;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -94,7 +112,18 @@ function jsonResponse(data: unknown, status = 200, headers: Record<string, strin
 }
 
 function htmlResponse(body: string, status = 200): Response {
-  return new Response(body, { status, headers: { "Content-Type": "text/html; charset=utf-8" } });
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer",
+      // Chrome applies form-action to redirects as well as the initial POST.
+      // OAuth setup posts to us, then redirects to an HTTPS provider; password
+      // flows may redirect directly to a loopback MCP-client callback.
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self' https: http://localhost:* http://127.0.0.1:*; base-uri 'none'",
+    },
+  });
 }
 
 function oauthError(error: string, description: string, status = 400): Response {
@@ -219,7 +248,7 @@ export async function handleAuthorizeGet(request: Request, integration: Integrat
     env.SEAL_KEY,
   );
 
-  if (integration.kind === "password") {
+  if (integration.kind === "password" || integration.kind === "user-client-oauth") {
     return htmlResponse(loginPage(integration, state));
   }
   // OAuth integration: hand off to the upstream provider; our sealed state
@@ -233,12 +262,12 @@ async function unsealState(raw: string, integration: Integration, sealKey: strin
   return state;
 }
 
-/** Redirect back to the MCP client with a sealed authorization code. */
-async function finishAuthorize(
+/** Build the MCP client's callback URL with a freshly sealed authorization code. */
+async function authorizationRedirectUrl(
   state: StatePayload,
   result: { session: unknown; expiresInSeconds: number; grant: unknown },
   sealKey: string,
-): Promise<Response> {
+): Promise<string> {
   const code = await seal(
     {
       t: "code",
@@ -255,19 +284,53 @@ async function finishAuthorize(
   const redirect = new URL(state.ru);
   redirect.searchParams.set("code", code);
   if (state.st) redirect.searchParams.set("state", state.st);
-  return Response.redirect(redirect.toString(), 302);
+  return redirect.toString();
+}
+
+/** Redirect back to the MCP client with a sealed authorization code. */
+async function finishAuthorize(
+  state: StatePayload,
+  result: GrantResult,
+  sealKey: string,
+): Promise<Response> {
+  return Response.redirect(await authorizationRedirectUrl(state, result, sealKey), 302);
+}
+
+/**
+ * Providers with an extra approval step opt into the shared handoff page.
+ * The credential-bearing result remains only in a sealed browser field.
+ */
+async function beginClientHandoff(
+  integration: Integration,
+  state: StatePayload,
+  result: GrantResult,
+  env: Env,
+): Promise<Response> {
+  if (!integration.connectionFlow) return finishAuthorize(state, result, env.SEAL_KEY);
+  const browserState = { ...state, uc: undefined };
+  const handoff = await seal(
+    {
+      t: "handoff",
+      i: integration.id,
+      state: browserState,
+      result,
+      exp: nowSeconds() + CONNECTION_HANDOFF_TTL,
+    } satisfies HandoffPayload,
+    env.SEAL_KEY,
+  );
+  return htmlResponse(connectionPage(integration, { phase: "instruction", handoff }));
 }
 
 /** POST /<id>/authorize — password login form submission. */
 export async function handleAuthorizePost(request: Request, integration: Integration, env: Env): Promise<Response> {
-  if (integration.kind !== "password") return oauthError("invalid_request", "Unexpected form submission");
+  if (integration.kind === "oauth") return oauthError("invalid_request", "Unexpected form submission");
   const form = await request.formData();
   const state = await unsealState(String(form.get("state") ?? ""), integration, env.SEAL_KEY);
   if (!state) return oauthError("invalid_request", "Invalid or expired authorization session — restart the flow");
   const sealedState = String(form.get("state"));
 
   const creds: Record<string, string> = {};
-  for (const field of (integration as PasswordIntegration).fields) {
+  for (const field of integration.fields) {
     const value = form.get(field.name);
     if (typeof value !== "string" || !value) {
       return htmlResponse(loginPage(integration, sealedState, `Please fill in ${field.label}`), 400);
@@ -275,10 +338,16 @@ export async function handleAuthorizePost(request: Request, integration: Integra
     creds[field.name] = value;
   }
 
+  if (integration.kind === "user-client-oauth") {
+    const continuedState = await seal({ ...state, uc: creds } satisfies StatePayload, env.SEAL_KEY);
+    const callbackUrl = `${new URL(request.url).origin}/${integration.id}/callback`;
+    return Response.redirect(integration.authorizeUrl(callbackUrl, continuedState, creds, env), 302);
+  }
+
   try {
     // A REAL upstream login happens here — bad credentials never mint a code.
     const result = await (integration as PasswordIntegration).login(creds, env);
-    return finishAuthorize(state, result, env.SEAL_KEY);
+    return beginClientHandoff(integration, state, result, env);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Login failed";
     return htmlResponse(loginPage(integration, sealedState, message), 401);
@@ -287,7 +356,7 @@ export async function handleAuthorizePost(request: Request, integration: Integra
 
 /** GET /<id>/callback — the upstream OAuth provider sent the user back. */
 export async function handleUpstreamCallback(request: Request, integration: Integration, env: Env): Promise<Response> {
-  if (integration.kind !== "oauth") return oauthError("invalid_request", "Integration has no upstream callback");
+  if (integration.kind === "password") return oauthError("invalid_request", "Integration has no upstream callback");
   const url = new URL(request.url);
   const state = await unsealState(url.searchParams.get("state") ?? "", integration, env.SEAL_KEY);
   if (!state) return oauthError("invalid_request", "Invalid or expired authorization session — restart the flow");
@@ -295,10 +364,41 @@ export async function handleUpstreamCallback(request: Request, integration: Inte
   if (!code) return oauthError("access_denied", `${integration.name} did not return a code`);
 
   try {
-    const result = await integration.exchangeCode(code, `${url.origin}/${integration.id}/callback`, env);
-    return finishAuthorize(state, result, env.SEAL_KEY);
+    const callbackUrl = `${url.origin}/${integration.id}/callback`;
+    const result =
+      integration.kind === "user-client-oauth"
+        ? await integration.exchangeCode(code, callbackUrl, state.uc ?? {}, env)
+        : await integration.exchangeCode(code, callbackUrl, env);
+    return beginClientHandoff(integration, state, result, env);
   } catch (error) {
     return oauthError("invalid_request", `Upstream exchange failed: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
+/** POST /<id>/complete — generic provider-declared post-authorization check. */
+export async function handleComplete(request: Request, integration: Integration, env: Env): Promise<Response> {
+  const flow = integration.connectionFlow;
+  if (!flow) return oauthError("invalid_request", `${integration.name} has no completion flow`);
+  const form = await request.formData();
+  const rawHandoff = String(form.get("handoff") ?? "");
+  const handoff = await unseal<HandoffPayload>(rawHandoff, env.SEAL_KEY);
+  if (!handoff || handoff.t !== "handoff" || handoff.i !== integration.id || handoff.exp < nowSeconds()) {
+    return oauthError("invalid_request", "Invalid or expired connection handoff — restart the flow");
+  }
+
+  try {
+    const readiness = await flow.check(handoff.result.session, env);
+    if (readiness === "pending") {
+      return htmlResponse(connectionPage(integration, { phase: "pending", handoff: rawHandoff }));
+    }
+    const returnUrl = await authorizationRedirectUrl(handoff.state, handoff.result, env.SEAL_KEY);
+    return htmlResponse(connectionPage(integration, { phase: "ready", returnUrl }));
+  } catch (error) {
+    return oauthError(
+      "temporarily_unavailable",
+      `Could not verify ${integration.name} access: ${error instanceof Error ? error.message : error}`,
+      502,
+    );
   }
 }
 

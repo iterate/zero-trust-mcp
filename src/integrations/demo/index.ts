@@ -25,8 +25,23 @@ async function tokensToResult(res: Response, env: Env, previous?: DemoGrant): Pr
 
 export const demo: OAuthIntegration = {
   id: "demo",
-  name: "Dummy OAuth Provider",
+  name: "Demo",
   kind: "oauth",
+  presentation: {
+    setupDescription: "A fake OAuth provider that shows the complete flow without asking for real credentials.",
+    securitySummary: "The demo uses fake identity data and disposable OAuth tokens.",
+    setupGuide: {
+      title: "Try the demo",
+      description: "No account or credentials required.",
+      actionLabel: "Read the demo code",
+      actionUrl: "https://github.com/iterate/zero-trust-mcp/tree/main/dummy-oauth",
+      steps: [
+        { title: "Add it", description: "Run one of the commands above." },
+        { title: "Approve", description: "The browser opens a fake OAuth provider. Approve access." },
+        { title: "Call it", description: "Ask the MCP client to run whoami. The request goes through the same sealed-token flow as a real integration." },
+      ],
+    },
+  },
 
   authorizeUrl(callbackUrl, state, env) {
     const u = new URL(`${env.DEMO_PROVIDER_URL}/authorize`);
