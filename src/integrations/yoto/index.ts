@@ -5,7 +5,7 @@ import type { Env, GrantResult, UserClientOAuthIntegration } from "../types.js";
 import type { YotoRefreshCoordinator } from "./coordinator.js";
 import { parseTokenResponse, YotoClient } from "./client.js";
 
-export const YOTO_SCOPES = "family:library:view user:content:manage family:devices:view offline_access";
+export const YOTO_SCOPES = "family:library:view user:content:manage family:devices:view family:devices:control offline_access";
 
 export interface YotoSession {
   accessToken: string;
@@ -47,6 +47,7 @@ function json(data: unknown) {
 // These values become a single URL path component, never a path or query.
 const resourceId = z.string().min(1).max(256).regex(/^[A-Za-z0-9_-]+$/, "Use an ID returned by Yoto");
 const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: true };
+const playerWrite = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
 const streamTrack = z.object({
   title: z.string().trim().min(1).max(200),
   url: z.url({ protocol: /^https$/ }).describe("Public HTTPS audio URL; the player streams it directly"),
@@ -163,6 +164,51 @@ export const yoto: UserClientOAuthIntegration = {
       description: "List Yoto players in your family, including their device IDs, names and online flags. Does not provide live battery or playback status.",
       annotations: readOnly,
     }, async () => json(await client.request("/device-v2/devices/mine")));
+
+    server.registerTool("list_library", {
+      description: "List the family's Yoto library, including purchased and MYO cards, in the Android app's grouped view. Use the card IDs with get_library_card or play_card.",
+      annotations: readOnly,
+    }, async () => json(await client.request("/card/family/library?view=groups")));
+
+    server.registerTool("get_library_card", {
+      description: "Get a library card's details, including available chapter and track keys for play_card. Does not add the card to your family.",
+      inputSchema: z.object({ cardId: resourceId, timezone: z.string().min(1).max(100).default("UTC") }),
+      annotations: readOnly,
+    }, async ({ cardId, timezone }) => json(await client.request(`/card/details/${encodeURIComponent(cardId)}?timezone=${encodeURIComponent(timezone)}`)));
+
+    server.registerTool("play_card", {
+      description: "Play a Yoto card on a family player, optionally selecting chapter, track and seconds into the track. Use list_players and list_library/get_library_card for IDs and keys. Can also seek or change tracks by replaying with those keys. Requires an online player and the control scope; acceptance does not confirm playback.",
+      inputSchema: z.object({
+        deviceId: resourceId,
+        cardId: resourceId,
+        chapterKey: z.string().min(1).max(256).optional(),
+        trackKey: z.string().min(1).max(256).optional(),
+        secondsIn: z.number().int().min(0).max(2_147_483_647).default(0),
+      }).refine((value) => !value.trackKey || !!value.chapterKey, "A track key requires a chapter key"),
+      annotations: playerWrite,
+    }, async ({ deviceId, cardId, chapterKey, trackKey, secondsIn }) => json(await client.command(deviceId, "card-play", {
+      uri: `https://yoto.io/${cardId}`, chapterKey, trackKey, secondsIn, cutOff: 0,
+    })));
+
+    for (const action of ["pause", "resume", "stop"] as const) {
+      server.registerTool(`${action}_playback`, {
+        description: `${action[0].toUpperCase()}${action.slice(1)} playback on a Yoto family player. Requires the control scope. Acceptance does not confirm execution.`,
+        inputSchema: z.object({ deviceId: resourceId }),
+        annotations: playerWrite,
+      }, async ({ deviceId }) => json(await client.command(deviceId, `card-${action}`)));
+    }
+
+    server.registerTool("set_volume", {
+      description: "Set a Yoto player's volume from 0 (mute) to 100 percent. The player's configured volume limit still applies.",
+      inputSchema: z.object({ deviceId: resourceId, volume: z.number().int().min(0).max(100) }),
+      annotations: playerWrite,
+    }, async ({ deviceId, volume }) => json(await client.command(deviceId, "set-volume", { volume })));
+
+    server.registerTool("set_sleep_timer", {
+      description: "Send the Yoto Android app's sleep timer command, with duration in seconds. Acceptance does not confirm execution.",
+      inputSchema: z.object({ deviceId: resourceId, seconds: z.number().int().min(0).max(2_147_483_647) }),
+      annotations: playerWrite,
+    }, async ({ deviceId, seconds }) => json(await client.command(deviceId, "sleep", { seconds })));
 
     server.registerTool("list_myo_cards", {
       description: "List your Yoto Make Your Own (MYO) cards. Use get_card for chapters and tracks; purchased cards are not included in this list.",

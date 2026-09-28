@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0-beta.1",
-    "waitrose": "1.2.1",
+    "waitrose": "github:jonastemplestein/waitrose#2e25adb653ccc4153727f86e1b824fe56e75e99d",
     "zod": "^4.2.0"
   },
   "devDependencies": {

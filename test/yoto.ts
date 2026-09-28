@@ -78,6 +78,7 @@ let apiStatus = 200;
 let tokenMode = "valid";
 let createdCard: any;
 let apiCalls = 0;
+const commands: { path: string; body: any }[] = [];
 
 const upstream = Bun.serve({
   port: 0,
@@ -131,11 +132,22 @@ const upstream = Bun.serve({
 
     if (url.pathname === "/device-v2/devices/mine" || url.pathname === "/content/mine" ||
         url.pathname === "/content/card_test" || url.pathname === "/content" ||
+        url.pathname.startsWith("/device-v2/player_test/command/") || url.pathname === "/card/family/library" || url.pathname === "/card/details/card_test" ||
         url.pathname === "/card/family/library/groups" || url.pathname === "/card/family/library/groups/group_test") {
       apiCalls++;
       if (apiStatus !== 200) return new Response(FAKE_CLIENT_SECRET, { status: apiStatus });
       const bearer = (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
       if (bearer !== currentAccess) return Response.json({ authenticated: false }, { status: 401 });
+      if (url.pathname.startsWith("/device-v2/player_test/command/")) {
+        assert(request.method === "POST", "player command uses POST");
+        commands.push({ path: url.pathname, body: await request.json() });
+        return new Response(null, { status: 200, headers: { "x-amzn-RequestId": "command-request" } });
+      }
+      if (url.pathname === "/card/family/library") {
+        assert(url.searchParams.get("view") === "groups", "library uses APK grouped view");
+        return Response.json({ cards: [{ cardId: "card_test" }] });
+      }
+      if (url.pathname === "/card/details/card_test") return Response.json({ card: { cardId: "card_test", content: { chapters: [{ key: "01" }] } } });
       if (url.pathname === "/content" && request.method === "POST") {
         createdCard = await request.json();
         return Response.json({ card: { cardId: "new_card", ...createdCard } });
@@ -225,7 +237,7 @@ try {
 
   const consentUrl = new URL(upstreamRedirect.headers.get("location")!);
   assert(consentUrl.searchParams.get("audience") === "https://api.yotoplay.com", "requests the Yoto API audience");
-  assert(consentUrl.searchParams.get("scope") === "family:library:view user:content:manage family:devices:view offline_access", "requests the supported tool scopes and refresh access");
+  assert(consentUrl.searchParams.get("scope") === "family:library:view user:content:manage family:devices:view family:devices:control offline_access", "requests the supported tool scopes and refresh access");
   assert(!consentUrl.toString().includes(FAKE_CLIENT_SECRET), "client secret is not exposed in the consent URL");
   const upstreamConsent = await fetch(consentUrl, { redirect: "manual" });
   for (const mode of ["missing-refresh", "malformed"]) {
@@ -317,7 +329,7 @@ try {
     return JSON.parse(message.result.content[0].text);
   }
   const { message: listing } = await rpc("tools/list", {});
-  assert(listing.result.tools.length === 6, "all six Yoto tools are discoverable");
+  assert(listing.result.tools.length === 14, "all fourteen Yoto tools are discoverable");
   assert(listing.result.tools.find((t: any) => t.name === "create_streaming_card").annotations.idempotentHint === false, "creation is marked non-idempotent");
   assert((await call("list_myo_cards")).cards[0].cardId === "card_test", "MYO response survives MCP serialization");
   assert((await call("get_card", { cardId: "card_test" })).card.content.chapters.length === 0, "card details include chapters");
@@ -332,8 +344,30 @@ try {
   assert(createdCard.content.chapters[1].key === "02" && createdCard.content.chapters[1].tracks[0].format === "aac", "preserves chapter order and explicit format");
   assert(!createdCard.cardId, "creation never accidentally updates an existing card");
 
+  assert((await call("list_library")).cards[0].cardId === "card_test", "full library cards are discoverable");
+  assert((await call("get_library_card", { cardId: "card_test" })).card.content.chapters[0].key === "01", "purchased card chapter keys are available");
+  const played = await call("play_card", { deviceId: "player_test", cardId: "card_test", chapterKey: "02", trackKey: "03", secondsIn: 42 });
+  assert(played.accepted && played.requestId === "command-request", "empty native response means accepted command, not playback confirmation");
+  assert(JSON.stringify(commands.at(-1)) === JSON.stringify({ path: "/device-v2/player_test/command/card-play", body: { uri: "https://yoto.io/card_test", chapterKey: "02", trackKey: "03", secondsIn: 42, cutOff: 0 } }), "play/seek matches APK body and URI");
+  await call("play_card", { deviceId: "player_test", cardId: "card_test" });
+  assert(commands.at(-1)!.body.secondsIn === 0 && !("trackKey" in commands.at(-1)!.body), "whole-card play defaults position and omits optional keys");
+  for (const action of ["pause", "resume", "stop"]) {
+    await call(`${action}_playback`, { deviceId: "player_test" });
+    assert(commands.at(-1)!.path.endsWith(`/card-${action}`) && JSON.stringify(commands.at(-1)!.body) === "{}", `${action} uses native route and empty object`);
+  }
+  for (const volume of [0, 50, 100]) {
+    await call("set_volume", { deviceId: "player_test", volume });
+    assert(commands.at(-1)!.path.endsWith("/set-volume") && commands.at(-1)!.body.volume === volume, "volume uses the API percentage scale");
+  }
+  await call("set_sleep_timer", { deviceId: "player_test", seconds: 900 });
+  assert(commands.at(-1)!.path.endsWith("/sleep") && commands.at(-1)!.body.seconds === 900, "sleep timer sends seconds");
+
   const beforeInvalid = apiCalls;
   for (const [name, args] of [
+    ["play_card", { deviceId: "../escape", cardId: "card_test" }],
+    ["play_card", { deviceId: "player_test", cardId: "card_test", trackKey: "01" }],
+    ["set_volume", { deviceId: "player_test", volume: 101 }],
+    ["set_sleep_timer", { deviceId: "player_test", seconds: -1 }],
     ["get_card", { cardId: "../mine?token=oops" }],
     ["get_library_group", { groupId: ".." }],
     ["create_streaming_card", { title: "Empty", tracks: [] }],
@@ -348,6 +382,11 @@ try {
     const { message } = await rpc("tools/call", { name: "list_players", arguments: {} });
     assert(message.error || message.result?.isError, `upstream ${status} is a tool error`);
     assert(!JSON.stringify(message).includes(FAKE_CLIENT_SECRET), "upstream error body never leaks to MCP");
+    const beforeCommand = apiCalls;
+    const commandError = await rpc("tools/call", { name: "pause_playback", arguments: { deviceId: "player_test" } });
+    assert(commandError.message.error || commandError.message.result?.isError, `command ${status} is a tool error`);
+    assert(apiCalls === beforeCommand + 1, "failed command is not retried");
+    assert(!JSON.stringify(commandError.message).includes(FAKE_CLIENT_SECRET), "command errors redact provider bodies");
   }
   apiStatus = 200;
   const wrongAudience = await fetch(`${workerOrigin}/waitrose/mcp`, { headers: { authorization: `Bearer ${accessToken}` } });

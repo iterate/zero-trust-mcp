@@ -36,6 +36,9 @@ function json(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
 }
 
+const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: true };
+const slotType = z.enum(["DELIVERY", "COLLECTION"]);
+
 async function login(creds: Record<string, string>): Promise<GrantResult> {
   const client = new WaitroseClient();
   const session = await client.login(creds.username, creds.password);
@@ -101,6 +104,7 @@ export const waitrose: PasswordIntegration = {
       "get_trolley",
       { description: "Get the current Waitrose trolley (shopping cart): items, quantities and totals." },
       async () => {
+        await client.getShoppingContext();
         const t = await client.getTrolley();
         const productsByLine = new Map(t.products.map((p) => [p.lineNumber, p]));
         return json({
@@ -125,6 +129,7 @@ export const waitrose: PasswordIntegration = {
         }),
       },
       async ({ lineNumber, quantity }) => {
+        await client.getShoppingContext();
         const t = await client.addToTrolley(lineNumber, quantity ?? 1);
         return json({
           ok: !t.failures?.length,
@@ -142,6 +147,7 @@ export const waitrose: PasswordIntegration = {
         inputSchema: z.object({ lineNumber: z.string() }),
       },
       async ({ lineNumber }) => {
+        await client.getShoppingContext();
         const t = await client.removeFromTrolley(lineNumber);
         return json({
           ok: !t.failures?.length,
@@ -207,6 +213,55 @@ export const waitrose: PasswordIntegration = {
         });
       },
     );
+
+    server.registerTool("get_current_slot", {
+      description: "Get the current Waitrose delivery or collection slot.",
+      annotations: readOnly,
+    }, async () => {
+      await client.getShoppingContext();
+      return json(await client.getCurrentSlot());
+    });
+
+    server.registerTool("list_slot_dates", {
+      description: "List available Waitrose delivery or collection dates. Use the contact address ID from get_account_info for delivery, or a known branch ID for collection.",
+      inputSchema: z.object({ slotType, branchId: z.string().min(1).optional(), addressId: z.string().min(1).optional() }),
+      annotations: readOnly,
+    }, async ({ slotType, branchId, addressId }) => {
+      await client.getShoppingContext();
+      return json(await client.getSlotDates(slotType, branchId, addressId));
+    });
+
+    server.registerTool("list_slots", {
+      description: "Get available Waitrose slots from a date, including IDs, times and charges. Use slot IDs with book_slot.",
+      inputSchema: z.object({ slotType, fromDate: z.iso.date(), branchId: z.string().min(1).optional(), addressId: z.string().min(1).optional() }),
+      annotations: readOnly,
+    }, async ({ slotType, fromDate, branchId, addressId }) => {
+      await client.getShoppingContext();
+      return json(await client.getSlotDays(slotType, fromDate, branchId, addressId));
+    });
+
+    server.registerTool("book_slot", {
+      description: "Reserve a Waitrose delivery or collection slot. May replace the existing reservation. Does not place the order. Review checkout afterwards.",
+      inputSchema: z.object({ slotId: z.string().min(1), slotType, addressId: z.string().min(1).optional() }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    }, async ({ slotId, slotType, addressId }) => {
+      await client.getShoppingContext();
+      return json(await client.bookSlot(slotId, slotType, addressId));
+    });
+
+    server.registerTool("get_checkout", {
+      description: "Review the current Waitrose order, full trolley, slot, estimated total and instant-checkout eligibility. Read only. Resolve blockers before place_order; payment setup or challenges may require checkoutUrl.",
+      annotations: readOnly,
+    }, async () => json(await client.getCheckout()));
+
+    server.registerTool("place_order", {
+      description: "Place a reviewed Waitrose order using existing account payment setup. This commits a purchase: obtain user authorization for the reviewed trolley, slot and estimated total first. Supply the orderId and estimated total from get_checkout. Rechecks eligibility and totals, then submits once. If the outcome is unknown, inspect get_order before retrying. Totals remain estimates, not a price lock or settlement receipt.",
+      inputSchema: z.object({
+        orderId: z.string().min(1),
+        expectedTotal: z.object({ amount: z.number().finite().nonnegative(), currencyCode: z.string().regex(/^[A-Z]{3}$/) }),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    }, async ({ orderId, expectedTotal }) => json(await client.placeOrder({ orderId, expectedTotal })));
 
     server.registerTool(
       "get_account_info",

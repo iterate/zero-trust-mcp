@@ -1,12 +1,11 @@
 # Yoto integration research
 
-Researched 28 September 2026. Implementation targets the published developer
-API; no APK was downloaded or decompiled.
+Researched 28 September 2026. Content tools use the published developer API;
+playback and full library discovery were traced through the Android APK.
 
 ## Existing MCP servers
 
-There are community implementations, so Yoto does not need to be reverse
-engineered from its Android application:
+There are existing community implementations:
 
 - [bperkinspdx/yoto-mcp-server](https://github.com/bperkinspdx/yoto-mcp-server)
   provides a Node/stdio MCP server for audio upload and MYO content. Its source
@@ -51,9 +50,11 @@ adapter. The running Worker necessarily sees credentials while handling a
 request, and a client still needs to protect its sealed tokens.
 
 Requested [scopes](https://yoto.dev/authentication/scopes/):
-`family:library:view user:content:manage family:devices:view offline_access`.
-Content management includes content viewing; player control, player settings,
-family member details and profile access are not requested.
+`family:library:view user:content:manage family:devices:view family:devices:control offline_access`.
+Content management includes content viewing. Player control is now requested;
+existing connections must enable this scope in their developer client and
+reconnect to consent. Refreshing an old grant does not add scopes. Player
+settings, family member details and profile access are not requested.
 
 ## Tool coverage and API evidence
 
@@ -73,10 +74,12 @@ Link the resulting playlist to a physical MYO card using the Yoto app.
 
 ## Boundaries and validation
 
-- `list_myo_cards` is not the purchased-card library. Library groups can contain
-  other accessible content but are not a complete enumeration of ungrouped cards.
-- No local-file uploads, transcoding, physical-card linking, deletion or
-  playback commands are implemented in this initial adapter.
+- `list_myo_cards` covers MYO only; `list_library` uses the Android family library
+  view, and `get_library_card` obtains chapters/tracks for purchased content.
+- No local-file uploads, transcoding, physical-card linking or deletion.
+- Player commands use Android REST endpoints. A successful empty HTTP response
+  means the command was accepted, not that an offline player executed it. No
+  automatic retry is performed.
 - The documented [REST status endpoint](https://yoto.dev/api/devices/getdevicestatus/)
   is deprecated and requires a scope absent from the public scope list. Current
   [live status](https://yoto.dev/players-mqtt/getting-player-status/) uses MQTT.
@@ -89,8 +92,54 @@ Link the resulting playlist to a physical MYO card using the Yoto app.
   credential sentinels.
 - No real Yoto account, developer client or physical player was used for
   validation. Provider-side acceptance of a new confidential client and actual
-  card creation remain live checks. The implementation is based on documentation,
-  not a claim that those live checks passed.
+  card creation/playback remain live checks. Android endpoints may have different
+  authorization requirements for developer clients; a 403 is surfaced with a
+  scope/reconnect hint. No official-app OAuth credentials are extracted or reused.
 
 Run `bun run test:yoto` for the local protocol and tool proof. It starts and
 stops its own Worker and fake provider, and removes its temporary durable state.
+
+## Android playback evidence
+
+APK: `com.yotoplay.yoto`, version **4.0**, version code **15800**. Retrieved from
+[APKPure's Yoto download](https://apkpure.net/yoto-music-stories-sleep/com.yotoplay.yoto/download)
+on 28 September 2026 and decompiled with JADX. Base APK SHA-256:
+`57583987ad242373fc83eec33f8b237eb51701fd1cec3421ae52c77aa8833fa6`.
+No APK, decompiled source, app credentials or bundled signed media URLs are committed.
+JADX reported errors in unrelated methods; the interfaces, request models and
+bundled fixtures below were readable. Decompiled class filenames may differ in
+case/obfuscation; the package and method/route identify each reference.
+
+| Tool | APK HTTP request | Request body |
+| --- | --- | --- |
+| `list_library` | GET `/card/family/library?view=groups` | — |
+| `get_library_card` | GET `/card/details/{cardId}?timezone={timezone}` | — |
+| `play_card` | POST `/device-v2/{deviceId}/command/card-play` | `uri`, optional `chapterKey`/`trackKey`, `secondsIn`, `cutOff: 0` |
+| `pause_playback` | POST `/device-v2/{deviceId}/command/card-pause` | `{}` |
+| `resume_playback` | POST `/device-v2/{deviceId}/command/card-resume` | `{}` |
+| `stop_playback` | POST `/device-v2/{deviceId}/command/card-stop` | `{}` |
+| `set_volume` | POST `/device-v2/{deviceId}/command/set-volume` | `volume` (0–100) |
+| `set_sleep_timer` | POST `/device-v2/{deviceId}/command/sleep` | `seconds` |
+
+Evidence trail:
+
+- `de/InterfaceC4772a` (DevicePlaybackService): Retrofit routes and HTTP methods.
+- `de/C4773b`: uses `{}` for pause/resume/stop; constructs PlayCardRequest,
+  VolumeRequest and SleepTimerRequest; play response reads `x-amzn-RequestId`.
+- `com/yotoplay/yoto/datamodels/PlayCardRequest` and its Moshi adapter: exact
+  serialized field names. SleepTimerRequest and VolumeRequest likewise.
+- `Uf/a` (DevicePlaybackRepository): card URI is `https://yoto.io/` + card ID;
+  normal play passes `cutOff: 0`. Volume maps the UI's 0–16 steps to
+  `ceil(step * 6.25)` before invoking the API. The MCP accepts the resulting
+  percentage directly, avoiding a mistaken 0–16 wire scale.
+- `rd/c` and `rd/d`: family library route and dynamic card/details URL with
+  timezone query. Details do not use the separate resolve/addToFamily flow.
+- Bundled `assets/wiremock/mappings/postPlayOnPlayer.json`: POST card-play
+  succeeds with HTTP 200 **and no body**. `getLibrary.json` and
+  `getCardDetails_afr13.json` independently confirm the discovery routes.
+
+`play_card` also supports choosing a track or seeking to seconds within one;
+relative next/previous requires current playback state and is not claimed here.
+Real-time MQTT state/acknowledgements remain outside this REST adapter. Requests
+are authenticated with the user's own developer client, using the public
+[control scope](https://yoto.dev/authentication/scopes/).
