@@ -16,8 +16,10 @@ import { indexPage } from "./html.js";
 import type { Env, Integration } from "./integrations/types.js";
 import { waitrose } from "./integrations/waitrose/index.js";
 import { demo } from "./integrations/demo/index.js";
+import { yoto } from "./integrations/yoto/index.js";
 import { monzo } from "./integrations/monzo/index.js";
 
+export { YotoRefreshCoordinator } from "./integrations/yoto/coordinator.js";
 export { MonzoRefreshCoordinator } from "./integrations/monzo/coordinator.js";
 
 // The whole "folder full of integrations" idea: one entry here, one folder
@@ -27,6 +29,7 @@ const integrations: Record<string, Integration> = {
   [waitrose.id]: waitrose,
   [demo.id]: demo,
   [monzo.id]: monzo,
+  [yoto.id]: yoto,
 };
 
 // One handler at module scope; the factory runs per request and registers

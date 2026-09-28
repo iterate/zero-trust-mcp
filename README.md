@@ -1,6 +1,6 @@
 # zero-trust-mcp
 
-**A remote MCP server that stores no third-party credentials or user data.** Credentials live AES-256-GCM-sealed *inside the OAuth tokens the MCP client itself holds*. Monzo adds a tiny refresh coordinator whose only durable values are a generation number and one-way token hash—state that cannot call Monzo.
+**A remote MCP server that stores no third-party credentials or user data.** Credentials live AES-256-GCM-sealed *inside the OAuth tokens the MCP client itself holds*. Monzo and Yoto add small refresh coordinators whose only durable values are a generation number and one-way token hash—state that cannot call an upstream API.
 
 Each integration gets its own path with a complete, standalone OAuth 2.1 lifecycle:
 
@@ -8,6 +8,7 @@ Each integration gets its own path with a complete, standalone OAuth 2.1 lifecyc
 https://<worker>/waitrose/mcp     ← real grocery API, username/password upstream
 https://<worker>/demo/mcp         ← runnable fake OAuth provider
 https://<worker>/monzo/mcp        ← real Monzo API, user-supplied OAuth client
+https://<worker>/yoto/mcp         ← Yoto developer API, user-supplied OAuth client
 ```
 
 Connecting with the real Claude CLI just works:
@@ -42,7 +43,7 @@ Built on Cloudflare Workers with the [MCP TypeScript SDK v2 beta](https://github
 
 Remote MCP servers are becoming the way agents reach third-party APIs. The default architecture is uncomfortable: a hosted MCP server that proxies to upstream APIs normally keeps a **database of everyone's upstream credentials** — refresh tokens, sometimes passwords. That database is a breach magnet, an operational liability, and a trust problem ("why does this random connector service have my grocery password in its Postgres?").
 
-This project explores the other extreme: **the client holds the capability.** OAuth already forces MCP clients to hold an access token and a refresh token, send them back on requests, and replace them on refresh. If those tokens are encrypted blobs *containing the upstream credentials*, the server can unseal state from each request, act on it, and hand back updated state without retaining a usable third-party capability. Monzo's hash-only coordinator prevents concurrent refresh races without retaining a credential.
+This project explores the other extreme: **the client holds the capability.** OAuth already forces MCP clients to hold an access token and a refresh token, send them back on requests, and replace them on refresh. If those tokens are encrypted blobs *containing the upstream credentials*, the server can unseal state from each request, act on it, and hand back updated state without retaining a usable third-party capability. The Monzo and Yoto hash-only coordinators prevent concurrent refresh races without retaining a credential.
 
 The crypto pattern is old and sound — it's how [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) seals sessions into cookies and how Rails encrypts session cookies — but as far as we could find, nobody had written it up for MCP.
 
@@ -154,6 +155,10 @@ src/
     types.ts             Integration contract, presentation + completion hooks
     waitrose/
       index.ts           package adapter: login, catalogue, trolley, order details, account
+    yoto/
+      index.ts           OAuth adapter + MYO cards, library groups, player inventory
+      client.ts          bounded HTTP requests and token validation
+      coordinator.ts     hash-only refresh serialization
     monzo/
       index.ts           OAuth adapter + tools
       coordinator.ts     hash-only refresh serialization
@@ -203,6 +208,34 @@ one adapter object and one registry entry even if the catalogue grows large.
 
 The `grant` is whatever your integration needs to mint future sessions: credentials for password APIs (like Waitrose, where refresh doesn't work), the upstream refresh token for OAuth APIs (like Gmail would be). It's sealed into the refresh token and never stored.
 
+## Yoto
+
+Yoto has a [public developer API](https://yoto.dev/api/) and existing community
+MCP servers. This adapter brings it into the same hosted, sealed-credential
+model as the other integrations. [Research and API references](docs/yoto-research.md)
+explain the existing alternatives and why APK reverse engineering was unnecessary.
+
+1. Create a **confidential** application at [dashboard.yoto.dev](https://dashboard.yoto.dev/).
+2. Set the allowed callback to `https://<worker>/yoto/callback`.
+3. Enable `family:library:view user:content:manage family:devices:view offline_access`.
+4. Add `https://<worker>/yoto/mcp` to your MCP client. Enter your developer client
+   ID and secret in the setup form, then sign in and consent on Yoto's site.
+
+```sh
+claude mcp add --transport http yoto https://<worker>/yoto/mcp
+```
+
+Tools: `list_players`, `list_myo_cards`, `get_card`, `list_library_groups`,
+`get_library_group`, and `create_streaming_card`. Streaming cards take public
+HTTPS MP3/AAC URLs and need internet during playback; link them to physical MYO
+cards in the Yoto app. Group listings do not enumerate all ungrouped purchased
+cards. Local audio uploads and live playback/status over MQTT are not included.
+
+`bun run test:yoto` exercises OAuth, all tools, concurrent refresh and storage
+boundaries against a fake provider using the real Worker. **A real Yoto account
+has not been used for validation.** Deployment includes the new Yoto Durable
+Object binding and `v2` migration in `wrangler.jsonc`.
+
 ## Running it
 
 Prerequisites: [bun](https://bun.sh), a Cloudflare account, `wrangler` logged in (set `CLOUDFLARE_ACCOUNT_ID` if your token spans several accounts).
@@ -242,7 +275,7 @@ Implements the [MCP authorization spec (2025-06-18)](https://modelcontextprotoco
 
 - **Authorization codes are not single-use.** With no storage there's nothing to burn a code against. Mitigations: 2-minute TTL + PKCE binding (a replayed code needs the same verifier).
 - **No local revocation list.** A sealed access token is valid until it expires. Upstream revocation still propagates on API use or refresh, and rotating `SEAL_KEY` is a global kill-switch—which also logs out every user.
-- **Monzo refresh recovery is intentionally limited.** The hash-only coordinator prevents concurrent rotations but cannot recover a newly rotated refresh token if the successful response is lost. That case requires interactive OAuth again.
+- **Monzo and Yoto refresh recovery is intentionally limited.** The hash-only coordinator prevents concurrent rotations but cannot recover a newly rotated refresh token if the successful response is lost. That case requires interactive OAuth again.
 - **A live Worker can see tokens in flight.** The design protects credentials at rest; it cannot protect against an actively malicious or compromised deployment serving the request.
 - **Sealed credentials live in client hands.** For password integrations, the user's password sits AES-sealed inside the refresh token in the MCP client's token store. The crypto is sound; your threat model must be comfortable with ciphertext-at-rest outside your infrastructure — and with `SEAL_KEY` being the one secret that matters. It *is* the database now; guard it accordingly.
 - **Password-kind integrations are a workaround, not a virtue.** Waitrose has no OAuth, so the login form is the only way in. For upstreams with real OAuth (Gmail, etc.) the oauth-kind integration keeps passwords out of the picture entirely — the sealed grant is just the upstream refresh token.

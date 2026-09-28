@@ -11,12 +11,14 @@
   "vars": { "DEMO_PROVIDER_URL": "https://dummy-oauth-provider.templestein.workers.dev" },
   "durable_objects": {
     "bindings": [
-      { "name": "MONZO_REFRESH_COORDINATOR", "class_name": "MonzoRefreshCoordinator" }
+      { "name": "MONZO_REFRESH_COORDINATOR", "class_name": "MonzoRefreshCoordinator" },
+      { "name": "YOTO_REFRESH_COORDINATOR", "class_name": "YotoRefreshCoordinator" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["MonzoRefreshCoordinator"] }
+    { "tag": "v1", "new_sqlite_classes": ["MonzoRefreshCoordinator"] },
+    { "tag": "v2", "new_sqlite_classes": ["YotoRefreshCoordinator"] }
   ]
-  // The coordinator persists only { generation, SHA-256(refresh_token) }.
+  // Each coordinator persists only { generation, SHA-256(refresh_token) }.
   // The only secret configuration remains SEAL_KEY.
 }

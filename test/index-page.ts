@@ -1,5 +1,6 @@
 import { indexPage, loginPage } from "../src/html.js";
 import { monzo } from "../src/integrations/monzo/index.js";
+import { yoto } from "../src/integrations/yoto/index.js";
 import { waitrose } from "../src/integrations/waitrose/index.js";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -48,6 +49,7 @@ const html = indexPage("https://mcp.example.test", [
     },
   },
   { id: "future", name: "Future Provider" },
+  yoto,
 ] as any);
 
 console.log("\n=== Integration picker ===");
@@ -56,6 +58,11 @@ assert(html.includes('data-provider="monzo"'), "renders every current provider a
 assert(html.includes('data-provider="demo"'), "renders the runnable demo provider");
 assert(html.includes("Future Provider"), "renders a newly registered provider without provider-specific page code");
 assert(html.includes("https://mcp.example.test/future/mcp"), "derives the selected endpoint from origin and provider id");
+
+assert(html.includes('data-provider="yoto"'), "renders Yoto in the integration picker");
+assert(html.includes("https://mcp.example.test/yoto/callback"), "Yoto setup resolves the deployment callback");
+assert(html.includes("https://dashboard.yoto.dev/"), "Yoto setup links to its developer portal");
+assert(loginPage(yoto, "sealed-state").includes('name="client_secret"'), "Yoto setup collects a developer client secret");
 
 console.log("\n=== Client recipes ===");
 for (const label of ["Add to Claude", "Claude only", "Inspector", "Endpoint"]) {

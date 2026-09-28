@@ -4,6 +4,10 @@ export interface Env {
   SEAL_KEY: string;
   DEMO_PROVIDER_URL: string;
   MONZO_REFRESH_COORDINATOR: DurableObjectNamespace;
+  YOTO_REFRESH_COORDINATOR: DurableObjectNamespace;
+  /** Test overrides; production uses api.yotoplay.com and login.yotoplay.com. */
+  YOTO_API_ORIGIN?: string;
+  YOTO_AUTH_ORIGIN?: string;
   /** Test override; production defaults to https://api.monzo.com. */
   MONZO_API_ORIGIN?: string;
   /** Test override; production defaults to https://auth.monzo.com. */
