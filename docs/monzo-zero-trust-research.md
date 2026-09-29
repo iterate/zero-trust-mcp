@@ -38,9 +38,9 @@ This protects against an at-rest compromise of Worker configuration plus Durable
 ### API surface
 
 - Implemented reads are `/ping/whoami`, `/accounts`, `/balance`, `/pots`, `/transactions`, and `/transactions/{id}`, the last two with `expand[]=merchant`.
-- Implemented writes are webhook management: `POST /webhooks`, `GET /webhooks`, and `DELETE /webhooks/{id}`. Monzo sends `transaction.created` events with full transaction and merchant data to the registered URL, retrying failures up to five times. ([Developer API: Webhooks](https://docs.monzo.com/#webhooks))
+- Implemented writes are webhook management (`POST /webhooks`, `GET /webhooks`, `DELETE /webhooks/{id}`) and receipts (`PUT`, `GET`, and `DELETE /transaction-receipts`). Monzo sends `transaction.created` events with full transaction and merchant data to the registered URL, retrying failures up to five times. ([Developer API: Webhooks](https://docs.monzo.com/#webhooks))
 - Transaction pagination supports `since`, `before`, and `limit`; Monzo documents a maximum page size of 100. This MCP tool caps responses at 50 to protect model context. ([Developer API](https://docs.monzo.com/))
-- Monzo documents `429` but no contractual numeric rate limit. Money movement, annotations, and bulk history fetching are intentionally omitted.
+- Monzo documents `429` but no contractual numeric rate limit. Money movement, annotations, feed items, attachments, and bulk history fetching are omitted.
 - Monzo's developer API is intended for a user's own account or a small allowlisted set, not general public applications. BYO clients reduce credential custody but are not an explicit Monzo endorsement of a public hosted connector. Keep this deployment personal/small-scale unless Monzo approves a broader use. ([Developer API introduction](https://docs.monzo.com/))
 
 ### Webhooks
@@ -51,6 +51,17 @@ A registered webhook sends account data outside this design's boundary, to whate
 - Monzo lists only the webhooks "your application has registered", so `list_webhooks` will not show one registered through a different OAuth client.
 - Monzo does not document deduplicating registrations, so the tool is marked non-idempotent and tells the model to check `list_webhooks` first.
 - `bun run test:monzo:tools` checks each tool's method, path, form encoding, and HTTPS validation against a stubbed `fetch`. No live webhook has been registered.
+
+### Receipts
+
+`create_receipt` attaches line items to a transaction, shown in the Monzo app. Unlike other Monzo writes it takes JSON, and `external_id` makes it an upsert. ([Developer API: Receipts](https://docs.monzo.com/#receipts))
+
+- Monzo stores a receipt with missing `tax` fields or `null` values, but then fails to read or delete it with a `bad_response.marshaling` error. The tool fills every optional field with a concrete default (`tax: 0`, `unit: ""`, empty lists). ([community report](https://community.monzo.com/t/receipt-endpoints-not-functioning-as-intended/65657), [community report](https://community.monzo.com/t/receipt-fetch-delete-endpoint-issue/136744))
+- The tool takes one receipt-level currency and stamps it on every line. One report traced a `tax and amount currency mismatch` error to a missing line currency.
+- Receipts attach only to transactions the user initiated; others return `forbidden.insufficient_permissions`. ([Monzo reference app](https://github.com/monzo/reference-receipts-app)) Error messages now include Monzo's `code` and `message`, but not `params`, which carries client and user IDs.
+- Monzo's docs say items plus taxes, and payments, should add up to the total. It is unclear whether Monzo enforces this, so the tool reports mismatches as `warnings` instead of rejecting.
+- Items can model a Waitrose order from `get_order` line totals. The two integrations are separate MCP servers, so the agent does the matching.
+- `bun run test:monzo:tools` covers the request shape, defaults, warnings, and error codes against a stubbed `fetch`. No live receipt has been created.
 
 ## OAuth flow
 

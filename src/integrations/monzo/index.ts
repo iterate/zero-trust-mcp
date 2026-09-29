@@ -37,6 +37,63 @@ interface MonzoWebhook {
   url: string;
 }
 
+const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: true };
+
+const minorUnits = z.number().int();
+const receiptSubItem = z.object({
+  description: z.string().min(1).max(500),
+  amount: minorUnits.describe("Line total in minor units; negative for discounts"),
+  quantity: z.number().positive().default(1),
+  unit: z.string().max(20).default("").describe("e.g. kg; empty for countable items"),
+  tax: minorUnits.default(0).describe("Tax included in this line, in minor units"),
+});
+// Monzo stores receipts with missing tax fields or nulls but then cannot read
+// or delete them, so every optional field has a concrete default.
+const receiptSchema = z.object({
+  transaction_id: z.string().min(1),
+  external_id: z.string().min(1).max(200).describe("Your stable key, e.g. waitrose-<order ID>; saving again with it replaces the receipt"),
+  total: minorUnits.positive().describe("The transaction amount as positive minor units"),
+  currency: z.string().regex(/^[A-Z]{3}$/).default("GBP").describe("ISO 4217 code, applied to every line"),
+  items: z.array(receiptSubItem.extend({ sub_items: z.array(receiptSubItem).max(50).default([]) })).min(1).max(500),
+  taxes: z.array(z.object({
+    description: z.string().min(1).max(100),
+    amount: minorUnits,
+    tax_number: z.string().max(50).optional(),
+  })).max(20).default([]).describe("Only tax added on top of item amounts; UK VAT is usually already included"),
+  payments: z.array(z.object({
+    type: z.enum(["card", "cash", "gift_card"]),
+    amount: minorUnits,
+    last_four: z.string().regex(/^\d{4}$/).optional(),
+    gift_card_type: z.string().max(100).optional(),
+  })).max(20).default([]),
+  merchant: z.object({
+    name: z.string().max(200).optional(),
+    online: z.boolean().optional(),
+    phone: z.string().max(50).optional(),
+    email: z.string().max(200).optional(),
+    store_name: z.string().max(200).optional(),
+    store_address: z.string().max(500).optional(),
+    store_postcode: z.string().max(20).optional(),
+  }).default({}),
+});
+
+/** Monzo's documented totals rules, reported rather than enforced. */
+function receiptWarnings(receipt: z.infer<typeof receiptSchema>): string[] {
+  const sum = (lines: Array<{ amount: number }>) => lines.reduce((total, line) => total + line.amount, 0);
+  const warnings: string[] = [];
+  const itemsAndTaxes = sum(receipt.items) + sum(receipt.taxes);
+  if (itemsAndTaxes !== receipt.total) warnings.push(`Items plus taxes sum to ${itemsAndTaxes}, not the total ${receipt.total}`);
+  if (receipt.payments.length && sum(receipt.payments) !== receipt.total) {
+    warnings.push(`Payments sum to ${sum(receipt.payments)}, not the total ${receipt.total}`);
+  }
+  for (const item of receipt.items) {
+    if (item.sub_items.length && sum(item.sub_items) !== item.amount) {
+      warnings.push(`Sub-items of "${item.description}" sum to ${sum(item.sub_items)}, not its amount ${item.amount}`);
+    }
+  }
+  return warnings;
+}
+
 interface TokenResponse {
   access_token?: string;
   refresh_token?: string;
@@ -362,7 +419,7 @@ export const monzo: UserClientOAuthIntegration = {
       {
         description: "Get one Monzo transaction by ID with full merchant details, notes, metadata and settlement state. Use IDs from list_transactions or webhook events.",
         inputSchema: z.object({ transaction_id: z.string().min(1) }),
-        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+        annotations: readOnly,
       },
       async ({ transaction_id }) => {
         const params = new URLSearchParams([["expand[]", "merchant"]]);
@@ -378,7 +435,7 @@ export const monzo: UserClientOAuthIntegration = {
       {
         description: "List the webhooks this Monzo OAuth client has registered on an account. Webhooks registered by other clients are not visible.",
         inputSchema: z.object({ account_id: z.string() }),
-        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+        annotations: readOnly,
       },
       async ({ account_id }) => {
         const result = await client.get<{ webhooks: MonzoWebhook[] }>(`/webhooks?${new URLSearchParams({ account_id })}`);
@@ -397,7 +454,7 @@ export const monzo: UserClientOAuthIntegration = {
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
       async ({ account_id, url }) => {
-        const result = await client.request<{ webhook: MonzoWebhook }>("POST", "/webhooks", { account_id, url });
+        const result = await client.request<{ webhook: MonzoWebhook }>("POST", "/webhooks", new URLSearchParams({ account_id, url }));
         return json(result);
       },
     );
@@ -412,6 +469,55 @@ export const monzo: UserClientOAuthIntegration = {
       async ({ webhook_id }) => {
         await client.request("DELETE", `/webhooks/${encodeURIComponent(webhook_id)}`);
         return json({ deleted: webhook_id });
+      },
+    );
+
+    server.registerTool(
+      "create_receipt",
+      {
+        description: "Attach an itemised receipt to a Monzo transaction the user made; it appears on the transaction in the Monzo app. Saving again with the same external_id replaces that receipt. Amounts are integer minor units (pence). Item amounts are line totals and, plus any taxes, should sum to total; use negative items for discounts. For a Waitrose order, use get_order line totals and add an adjustment item if the card charge differs. Returns warnings when totals do not add up.",
+        inputSchema: receiptSchema,
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+      },
+      async (receipt) => {
+        const { currency } = receipt;
+        const line = <T extends object>(value: T) => ({ ...value, currency });
+        const result = await client.request<{ receipt_id?: string } | undefined>("PUT", "/transaction-receipts", {
+          ...receipt,
+          items: receipt.items.map(({ sub_items, ...item }) => ({ ...line(item), sub_items: sub_items.map(line) })),
+          taxes: receipt.taxes.map(line),
+          payments: receipt.payments.map(line),
+        });
+        return json({
+          saved: true,
+          external_id: receipt.external_id,
+          transaction_id: receipt.transaction_id,
+          receipt_id: result?.receipt_id,
+          warnings: receiptWarnings(receipt),
+        });
+      },
+    );
+
+    server.registerTool(
+      "get_receipt",
+      {
+        description: "Get a receipt this Monzo OAuth client created, by its external_id.",
+        inputSchema: z.object({ external_id: z.string().min(1).max(200) }),
+        annotations: readOnly,
+      },
+      async ({ external_id }) => json(await client.get(`/transaction-receipts?${new URLSearchParams({ external_id })}`)),
+    );
+
+    server.registerTool(
+      "delete_receipt",
+      {
+        description: "Delete a receipt this Monzo OAuth client created, by its external_id.",
+        inputSchema: z.object({ external_id: z.string().min(1).max(200) }),
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+      },
+      async ({ external_id }) => {
+        await client.request("DELETE", `/transaction-receipts?${new URLSearchParams({ external_id })}`);
+        return json({ deleted: external_id });
       },
     );
   },
