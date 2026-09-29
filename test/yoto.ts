@@ -77,6 +77,7 @@ let currentAccess = INITIAL_ACCESS;
 let apiStatus = 200;
 let tokenMode = "valid";
 let createdCard: any;
+let playerConfig = { maxVolumeLimit: "16", nightMaxVolumeLimit: "8" };
 let apiCalls = 0;
 const commands: { path: string; body: any }[] = [];
 
@@ -132,12 +133,23 @@ const upstream = Bun.serve({
 
     if (url.pathname === "/device-v2/devices/mine" || url.pathname === "/content/mine" ||
         url.pathname === "/content/card_test" || url.pathname === "/content" ||
+        url.pathname === "/device-v2/player_test/config" || url.pathname.startsWith("/media/") ||
         url.pathname.startsWith("/device-v2/player_test/command/") || url.pathname === "/card/family/library" || url.pathname === "/card/details/card_test" ||
         url.pathname === "/card/family/library/groups" || url.pathname === "/card/family/library/groups/group_test") {
       apiCalls++;
       if (apiStatus !== 200) return new Response(FAKE_CLIENT_SECRET, { status: apiStatus });
       const bearer = (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
       if (bearer !== currentAccess) return Response.json({ authenticated: false }, { status: 401 });
+      if (url.pathname === "/device-v2/player_test/config") {
+        if (request.method === "PUT") {
+          Object.assign(playerConfig, (await request.json() as any).config);
+          return Response.json({ status: "ok" });
+        }
+        return Response.json({ device: { name: "Ada", config: playerConfig } });
+      }
+      if (url.pathname === "/media/transcode/audio/uploadUrl") return Response.json({ upload: { uploadId: "upload_test", uploadUrl: "https://storage.example.com/signed" } });
+      if (url.pathname === "/media/upload/upload_test/transcoded") return Response.json({ transcode: { transcodedSha256: "A".repeat(43), transcodedInfo: { duration: 10, fileSize: 20, format: "aac", channels: "mono" } } });
+      if (url.pathname.startsWith("/media/displayIcons/user/")) return Response.json({ displayIcons: [{ mediaId: "A".repeat(43) }] });
       if (url.pathname.startsWith("/device-v2/player_test/command/")) {
         assert(request.method === "POST", "player command uses POST");
         commands.push({ path: url.pathname, body: await request.json() });
@@ -154,7 +166,7 @@ const upstream = Bun.serve({
       }
       if (url.pathname === "/device-v2/devices/mine") return Response.json({ devices: [{ deviceId: "player_test", name: "Bedroom", online: true }] });
       if (url.pathname === "/content/mine") return Response.json({ cards: [{ cardId: "card_test", title: "Story" }] });
-      if (url.pathname === "/content/card_test") return Response.json({ card: { cardId: "card_test", content: { chapters: [] } } });
+      if (url.pathname === "/content/card_test") return Response.json({ card: { cardId: "card_test", title: "Story", content: { chapters: [] }, metadata: { description: "Keep" } } });
       if (url.pathname.endsWith("/group_test")) return Response.json({ id: "group_test", cards: [{ cardId: "card_test" }] });
       return Response.json([{ id: "group_test", name: "Favourites" }]);
     }
@@ -237,7 +249,7 @@ try {
 
   const consentUrl = new URL(upstreamRedirect.headers.get("location")!);
   assert(consentUrl.searchParams.get("audience") === "https://api.yotoplay.com", "requests the Yoto API audience");
-  assert(consentUrl.searchParams.get("scope") === "family:library:view user:content:manage family:devices:view family:devices:control offline_access", "requests the supported tool scopes and refresh access");
+  assert(consentUrl.searchParams.get("scope") === "family:library:view user:content:manage family:devices:view family:devices:control family:devices:manage offline_access", "requests the supported tool scopes and refresh access");
   assert(!consentUrl.toString().includes(FAKE_CLIENT_SECRET), "client secret is not exposed in the consent URL");
   const upstreamConsent = await fetch(consentUrl, { redirect: "manual" });
   for (const mode of ["missing-refresh", "malformed"]) {
@@ -329,7 +341,7 @@ try {
     return JSON.parse(message.result.content[0].text);
   }
   const { message: listing } = await rpc("tools/list", {});
-  assert(listing.result.tools.length === 14, "all fourteen Yoto tools are discoverable");
+  assert(listing.result.tools.length === 28, "all twenty-eight Yoto tools are discoverable");
   assert(listing.result.tools.find((t: any) => t.name === "create_streaming_card").annotations.idempotentHint === false, "creation is marked non-idempotent");
   assert((await call("list_myo_cards")).cards[0].cardId === "card_test", "MYO response survives MCP serialization");
   assert((await call("get_card", { cardId: "card_test" })).card.content.chapters.length === 0, "card details include chapters");
@@ -362,8 +374,29 @@ try {
   await call("set_sleep_timer", { deviceId: "player_test", seconds: 900 });
   assert(commands.at(-1)!.path.endsWith("/sleep") && commands.at(-1)!.body.seconds === 900, "sleep timer sends seconds");
 
+  const playlist = await call("get_playlist", { cardId: "card_test" });
+  assert(playlist.revision && playlist.card.title === "Story", "editable playlist includes a revision");
+  await call("update_playlist", { cardId: "card_test", expectedRevision: playlist.revision, metadata: { cover: { imageL: "https://images.example.com/cover.png" } } });
+  assert(createdCard.metadata.description === "Keep" && createdCard.content.chapters.length === 0, "cover-only metadata update preserves playlist contents");
+  const uploaded = await call("prepare_audio_upload", { sha256: "A".repeat(43) });
+  assert(uploaded.uploadId === "upload_test" && uploaded.uploadRequired, "direct file upload handoff works through MCP");
+  assert((await call("get_audio_upload", { uploadId: "upload_test" })).ready, "transcode status returns usable track details");
+  await call("add_audio_to_card", { title: "Uploaded", tracks: [{ uploadId: "upload_test", title: "Sound" }] });
+  assert(createdCard.content.chapters[0].tracks[0].trackUrl === `yoto:#${"A".repeat(43)}`, "uploaded audio becomes native audio content");
+  await call("create_playlist", { title: "Multi", chapters: [{ key: "01", title: "First", tracks: [{ key: "01", title: "Track", type: "stream", format: "mp3", trackUrl: "https://cdn.example.com/one.mp3" }] }] });
+  assert(createdCard.content.chapters[0].display.icon16x16 === null, "general playlist schema provides a chapter display");
+  assert((await call("list_icons")).displayIcons.length === 1, "pixel icons are discoverable");
+  assert((await call("get_player_config", { deviceId: "player_test" })).device.name === "Ada", "player config is readable");
+  assert((await call("set_volume_limit", { deviceId: "player_test", limit: 10 })).verified, "Ada's maximum volume setting is verified through MCP");
+  assert(playerConfig.maxVolumeLimit === "10" && playerConfig.nightMaxVolumeLimit === "10", "maximum uses 0–16 step strings for day and night");
+  await call("update_player_config", { deviceId: "player_test", config: { maxVolumeLimit: 9 } });
+  assert(playerConfig.maxVolumeLimit === "9" && playerConfig.nightMaxVolumeLimit === "10", "partial config updates preserve other periods");
+
   const beforeInvalid = apiCalls;
   for (const [name, args] of [
+    ["set_volume_limit", { deviceId: "player_test", limit: 17 }],
+    ["upload_audio", { url: "file:///tmp/recording.mp3" }],
+    ["upload_cover_image", { imageUrl: "https://127.0.0.1/cover.png" }],
     ["play_card", { deviceId: "../escape", cardId: "card_test" }],
     ["play_card", { deviceId: "player_test", cardId: "card_test", trackKey: "01" }],
     ["set_volume", { deviceId: "player_test", volume: 101 }],

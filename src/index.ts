@@ -15,7 +15,6 @@ import {
 import { indexPage } from "./html.js";
 import type { Env, Integration } from "./integrations/types.js";
 import { waitrose } from "./integrations/waitrose/index.js";
-import { demo } from "./integrations/demo/index.js";
 import { yoto } from "./integrations/yoto/index.js";
 import { monzo } from "./integrations/monzo/index.js";
 
@@ -27,7 +26,6 @@ export { MonzoRefreshCoordinator } from "./integrations/monzo/coordinator.js";
 // complete standalone OAuth lifecycle.
 const integrations: Record<string, Integration> = {
   [waitrose.id]: waitrose,
-  [demo.id]: demo,
   [monzo.id]: monzo,
   [yoto.id]: yoto,
 };

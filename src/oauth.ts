@@ -1,6 +1,6 @@
 /**
  * A fully stateless OAuth 2.1 authorization server, instantiated once per
- * integration path (/waitrose/*, /demo/*). Each integration is its own
+ * integration path (/waitrose/*, /monzo/*). Each integration is its own
  * little AS + resource-server pair; a token minted for one path is invalid
  * on every other (the integration id is sealed into the token).
  *
@@ -478,7 +478,7 @@ export async function verifyAccessToken(request: Request, integrationId: string,
   const header = request.headers.get("Authorization") ?? "";
   if (!header.toLowerCase().startsWith("bearer ")) return null;
   const payload = await unseal<AccessPayload>(header.slice(7).trim(), sealKey);
-  // `i` is the audience: a token sealed for /waitrose is garbage at /demo.
+  // `i` is the audience: a token sealed for /waitrose is garbage at /monzo.
   if (!payload || payload.t !== "access" || payload.i !== integrationId || payload.exp < nowSeconds()) return null;
   return payload;
 }

@@ -15,19 +15,6 @@ const html = indexPage("https://mcp.example.test", [
     presentation: { affiliationNotice: "Independent software. Not affiliated with or endorsed by Waitrose & Partners." },
   },
   {
-    id: "demo",
-    name: "Demo",
-    presentation: {
-      setupGuide: {
-        title: "Try the demo",
-        description: "No account required.",
-        actionLabel: "Read the demo code",
-        actionUrl: "https://github.com/iterate/zero-trust-mcp/tree/main/dummy-oauth",
-        steps: [{ title: "Approve", description: "Use the fake provider." }],
-      },
-    },
-  },
-  {
     id: "monzo",
     name: "Monzo",
     presentation: {
@@ -55,7 +42,7 @@ const html = indexPage("https://mcp.example.test", [
 console.log("\n=== Integration picker ===");
 assert(html.includes('data-provider="waitrose"'), "renders the first registered provider as a selectable control");
 assert(html.includes('data-provider="monzo"'), "renders every current provider as a selectable control");
-assert(html.includes('data-provider="demo"'), "renders the runnable demo provider");
+assert(!html.includes('data-provider="demo"'), "omits the removed demo provider");
 assert(html.includes("Future Provider"), "renders a newly registered provider without provider-specific page code");
 assert(html.includes("https://mcp.example.test/future/mcp"), "derives the selected endpoint from origin and provider id");
 

@@ -2,7 +2,6 @@ import type { McpServer } from "@modelcontextprotocol/server";
 
 export interface Env {
   SEAL_KEY: string;
-  DEMO_PROVIDER_URL: string;
   MONZO_REFRESH_COORDINATOR: DurableObjectNamespace;
   YOTO_REFRESH_COORDINATOR: DurableObjectNamespace;
   /** Test overrides; production uses api.yotoplay.com and login.yotoplay.com. */
@@ -103,7 +102,7 @@ export interface PasswordIntegration extends IntegrationBase {
   login(creds: Record<string, string>, env: Env): Promise<GrantResult>;
 }
 
-/** Real OAuth upstream (e.g. the dummy provider, Gmail): the wizard redirects out and back. */
+/** Real OAuth upstream (e.g. Gmail): the wizard redirects out and back. */
 export interface OAuthIntegration extends IntegrationBase {
   kind: "oauth";
   authorizeUrl(callbackUrl: string, state: string, env: Env): string;

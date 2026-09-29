@@ -9,6 +9,7 @@
     "deploy": "wrangler deploy",
     "test:waitrose:live": "bun test/waitrose-live.ts",
     "test:monzo:live": "bun test/monzo-live.ts",
+    "test:yoto:authoring": "bun test test/yoto-authoring.test.ts",
     "test:yoto": "bun test/yoto.ts",
     "test:monzo": "bun test/monzo-concurrency.ts",
     "test:site": "bun test/index-page.ts",

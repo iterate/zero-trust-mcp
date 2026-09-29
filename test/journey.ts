@@ -1,13 +1,12 @@
 /**
  * End-to-end proof of the path-per-integration stateless MCP server.
- * Acts as a spec-compliant MCP client against BOTH integration endpoints:
+ * Acts as a spec-compliant MCP client against the Waitrose endpoint:
  *
  *   /waitrose/mcp — password integration (real Waitrose login)
- *   /demo/mcp     — OAuth integration (redirect to the dummy provider)
  *
  * Covers: discovery from the 401 challenge, DCR, authorize, PKCE (positive
  * and negative), tool calls, refresh grant, and cross-integration audience
- * rejection (a waitrose token must be garbage at /demo/mcp).
+ * rejection (a waitrose token must be garbage at /monzo/mcp).
  *
  * Usage: bun test/journey.ts <base-url> <waitrose-user> <waitrose-pass>
  */
@@ -100,7 +99,7 @@ async function connect(id: string): Promise<{ tokens: Tokens; meta: any }> {
   return { tokens, meta };
 }
 
-/** Simulate the human: waitrose → fill the login form; demo → approve at the provider. */
+/** Simulate the human filling the Waitrose login form. */
 async function driveUserThrough(authorizeUrl: string, id: string): Promise<string> {
   let res = await fetch(authorizeUrl, { redirect: "manual" });
   for (let hops = 0; hops < 6; hops++) {
@@ -121,22 +120,6 @@ async function driveUserThrough(authorizeUrl: string, id: string): Promise<strin
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ state: extractHidden(html, "state"), username: wUser, password: wPass }).toString(),
-        redirect: "manual",
-      });
-      continue;
-    }
-    if (html.includes("Dummy OAuth Provider")) {
-      console.log(`  → approving at the dummy OAuth provider`);
-      const providerOrigin = new URL(res.url).origin;
-      res = await fetch(`${providerOrigin}/authorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          redirect_uri: extractHidden(html, "redirect_uri"),
-          state: extractHidden(html, "state"),
-          client_id: extractHidden(html, "client_id"),
-          name: "Jonas T",
-        }).toString(),
         redirect: "manual",
       });
       continue;
@@ -187,22 +170,16 @@ assert(JSON.parse(out.result.content[0].text).email === wUser, "get_account_info
 out = await callTool("waitrose", w.tokens.access_token, "search_products", { query: "oat milk", size: 2 });
 assert(JSON.parse(out.result.content[0].text).totalMatches > 0, "search_products returns live results");
 
-step("demo: full connect");
-const d = await connect("demo");
-console.log("  tools:", (await listToolNames("demo", d.tokens.access_token)).join(", "));
-out = await callTool("demo", d.tokens.access_token, "whoami");
-assert(JSON.parse(out.result.content[0].text).sub === "Jonas T", "whoami hits the fake provider's API");
-
 step("audience binding: tokens are path-scoped");
-const cross = await fetch(`${base}/demo/mcp`, {
+const cross = await fetch(`${base}/monzo/mcp`, {
   method: "POST",
   headers: { "Content-Type": "application/json", Authorization: `Bearer ${w.tokens.access_token}` },
   body: "{}",
 });
-assert(cross.status === 401, "waitrose access token is rejected at /demo/mcp");
+assert(cross.status === 401, "waitrose access token is rejected at /monzo/mcp");
 
 step("refresh grants (stateless upstream re-auth)");
-for (const [id, t] of [["waitrose", w.tokens], ["demo", d.tokens]] as const) {
+for (const [id, t] of [["waitrose", w.tokens]] as const) {
   const res = await fetch(`${base}/${id}/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -210,7 +187,7 @@ for (const [id, t] of [["waitrose", w.tokens], ["demo", d.tokens]] as const) {
   });
   const refreshed = (await res.json()) as Tokens;
   assert(res.ok && refreshed.access_token, `${id}: refresh grant succeeded`);
-  const tool = id === "waitrose" ? "get_account_info" : "whoami";
+  const tool = "get_account_info";
   const check = await callTool(id, refreshed.access_token, tool);
   assert(check.result?.content?.[0]?.text, `${id}: refreshed token works (${tool})`);
 }

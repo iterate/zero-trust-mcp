@@ -6,7 +6,6 @@ Each integration gets its own path with a complete, standalone OAuth 2.1 lifecyc
 
 ```
 https://<worker>/waitrose/mcp     ← real grocery API, username/password upstream
-https://<worker>/demo/mcp         ← runnable fake OAuth provider
 https://<worker>/monzo/mcp        ← real Monzo API, user-supplied OAuth client
 https://<worker>/yoto/mcp         ← Yoto developer API, user-supplied OAuth client
 ```
@@ -162,10 +161,8 @@ src/
     monzo/
       index.ts           OAuth adapter + tools
       coordinator.ts     hash-only refresh serialization
-dummy-oauth/
-  src/index.ts           fake OAuth provider used by the runnable demo
 test/
-  journey.ts             legacy fixture journey: PKCE, refresh, audience binding
+  journey.ts             live Waitrose journey: PKCE, refresh, audience binding
   browser-proof.ts       drives the login page in headless Chrome via agent-browser
 ```
 
@@ -234,7 +231,7 @@ document the public API and Android APK evidence used for playback.
 
 1. Create a **confidential** application at [dashboard.yoto.dev](https://dashboard.yoto.dev/).
 2. Set the allowed callback to `https://<worker>/yoto/callback`.
-3. Enable `family:library:view user:content:manage family:devices:view family:devices:control offline_access`.
+3. Enable `family:library:view user:content:manage family:devices:view family:devices:control family:devices:manage offline_access`.
 4. Add `https://<worker>/yoto/mcp` to your MCP client. Enter your developer client
    ID and secret in the setup form, then sign in and consent on Yoto's site.
 
@@ -247,11 +244,34 @@ Tools: `list_players`, `list_library`, `get_library_card`, `list_myo_cards`,
 `play_card`, `pause_playback`, `resume_playback`, `stop_playback`, `set_volume`,
 and `set_sleep_timer`. Play supports chapter/track selection and seeking;
 volume uses 0–100 percent. Commands report API acceptance, not device execution.
-Existing connections must enable `family:devices:control` and reconnect.
+Existing connections must enable `family:devices:control` and `family:devices:manage`, then reconnect.
 
 Streaming cards take public HTTPS MP3/AAC URLs and need internet during playback;
-link them to physical MYO cards in the Yoto app. Local audio uploads and live
-playback state/acknowledgements over MQTT are not included.
+link them to physical MYO cards in the Yoto app. Live playback state and
+acknowledgements over MQTT are not included.
+
+The authoring/config tools bring Yoto to **28 tools**:
+
+- Audio: `upload_audio`, `prepare_audio_upload`, `get_audio_upload`, `add_audio_to_card`.
+- Playlists: `get_playlist`, `create_playlist`, `update_playlist`.
+- Artwork: `upload_cover_image`, `set_card_cover`, `list_icons`, `upload_icon`.
+- Settings: `get_player_config`, `update_player_config`, `set_volume_limit`.
+
+Audio and image imports accept direct HTTPS URLs, including temporary signed URLs.
+Audio imports are capped at 20 MiB and images at 5 MiB. For local or larger audio,
+`prepare_audio_upload` hands a signed upload URL to a filesystem-capable client.
+Playlist tools support multiple chapters/tracks, uploaded audio and streams,
+labels, chapter/track icons, cover art and chapter shuffle. Existing-card edits
+check a revision and preserve omitted content and metadata.
+
+For “set Ada's maximum volume to 10”, match her device ID using `list_players`,
+then call `set_volume_limit` with `limit: 10`. Limits use **0–16 steps**, whereas
+`set_volume` uses **0–100 percent** for current playback volume. The default
+changes both day and night limits; `period` can select just one. Config updates
+read back the stored values and distinguish acceptance from verified storage.
+
+[Authoring examples, endpoint evidence and limitations](docs/yoto-authoring.md).
+`bun run test:yoto:authoring` runs isolated media, editing and configuration tests.
 
 `bun run test:yoto` exercises OAuth, all tools, concurrent refresh and storage
 boundaries against a fake provider using the real Worker. **A real Yoto account
@@ -265,18 +285,16 @@ Prerequisites: [bun](https://bun.sh), a Cloudflare account, `wrangler` logged in
 ```sh
 bun install
 
-# each Worker's only secret configuration: a 32-byte sealing key
-openssl rand -base64 32 | bunx wrangler secret put SEAL_KEY -c dummy-oauth/wrangler.jsonc
+# First deployment only: configure a 32-byte sealing key.
+# Preserve the existing key on updates to keep connections valid.
 openssl rand -base64 32 | bunx wrangler secret put SEAL_KEY
 
-bunx wrangler deploy -c dummy-oauth/wrangler.jsonc
-# Put that URL in wrangler.jsonc as DEMO_PROVIDER_URL, then:
 bunx wrangler deploy
 ```
 
-For local dev put `SEAL_KEY=…` in `.dev.vars` (gitignored). The `global_fetch_strictly_public` compatibility flag lets the public Worker call the demo Worker when both use the same Cloudflare account.
+For local dev put `SEAL_KEY=…` in `.dev.vars` (gitignored). The `global_fetch_strictly_public` compatibility flag enables public fetch routing, including media hosted on same-account Workers.
 
-Prove everything against your deployment (the Waitrose leg needs a real login):
+Test the Waitrose connection against your deployment (requires a real login):
 
 ```sh
 bun test/journey.ts https://zero-trust-mcp.<you>.workers.dev you@example.com yourpassword

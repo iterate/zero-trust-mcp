@@ -3,9 +3,10 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { sha256b64url } from "../../seal.js";
 import type { Env, GrantResult, UserClientOAuthIntegration } from "../types.js";
 import type { YotoRefreshCoordinator } from "./coordinator.js";
+import { registerAuthoringTools } from "./authoring-tools.js";
 import { parseTokenResponse, YotoClient } from "./client.js";
 
-export const YOTO_SCOPES = "family:library:view user:content:manage family:devices:view family:devices:control offline_access";
+export const YOTO_SCOPES = "family:library:view user:content:manage family:devices:view family:devices:control family:devices:manage offline_access";
 
 export interface YotoSession {
   accessToken: string;
@@ -160,6 +161,7 @@ export const yoto: UserClientOAuthIntegration = {
   registerTools(server: McpServer, session: unknown) {
     const { accessToken, apiOrigin } = session as YotoSession;
     const client = new YotoClient(accessToken, apiOrigin);
+    registerAuthoringTools(server, client);
     server.registerTool("list_players", {
       description: "List Yoto players in your family, including their device IDs, names and online flags. Does not provide live battery or playback status.",
       annotations: readOnly,

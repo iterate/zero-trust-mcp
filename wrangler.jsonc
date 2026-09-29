@@ -3,12 +3,11 @@
   "name": "zero-trust-mcp",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-01",
-  // The demo provider is another workers.dev Worker on this account.
+  // Media imports use public fetch routing, including same-account Workers.
   "compatibility_flags": ["global_fetch_strictly_public"],
   // Request logs can retain bearer tokens and sealed OAuth state. They are
   // disabled so the operator cannot accumulate client-held capabilities.
   "observability": { "enabled": false },
-  "vars": { "DEMO_PROVIDER_URL": "https://dummy-oauth-provider.templestein.workers.dev" },
   "durable_objects": {
     "bindings": [
       { "name": "MONZO_REFRESH_COORDINATOR", "class_name": "MonzoRefreshCoordinator" },

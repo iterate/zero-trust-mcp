@@ -50,11 +50,12 @@ adapter. The running Worker necessarily sees credentials while handling a
 request, and a client still needs to protect its sealed tokens.
 
 Requested [scopes](https://yoto.dev/authentication/scopes/):
-`family:library:view user:content:manage family:devices:view family:devices:control offline_access`.
+`family:library:view user:content:manage family:devices:view family:devices:control family:devices:manage offline_access`.
 Content management includes content viewing. Player control is now requested;
 existing connections must enable this scope in their developer client and
 reconnect to consent. Refreshing an old grant does not add scopes. Player
-settings, family member details and profile access are not requested.
+settings now require `family:devices:manage`; family member details and profile
+access are not requested. See [authoring/config additions](yoto-authoring.md).
 
 ## Tool coverage and API evidence
 
@@ -76,7 +77,8 @@ Link the resulting playlist to a physical MYO card using the Yoto app.
 
 - `list_myo_cards` covers MYO only; `list_library` uses the Android family library
   view, and `get_library_card` obtains chapters/tracks for purchased content.
-- No local-file uploads, transcoding, physical-card linking or deletion.
+- Audio imports, direct file-upload handoff, provider transcoding, covers and icons
+  are supported by the authoring tools. Physical-card linking and deletion are not.
 - Player commands use Android REST endpoints. A successful empty HTTP response
   means the command was accepted, not that an offline player executed it. No
   automatic retry is performed.
