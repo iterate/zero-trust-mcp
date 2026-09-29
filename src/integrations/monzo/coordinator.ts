@@ -53,7 +53,8 @@ export class MonzoRefreshCoordinator extends DurableObject<Env> {
   async initialize(input: CoordinatorState): Promise<void> {
     const current = await this.ctx.storage.get<CoordinatorState>("state");
     if (!current) {
-      await this.ctx.storage.put("state", input);
+      // Copy the two fields so a caller can never persist anything else.
+      await this.ctx.storage.put("state", { generation: input.generation, refreshHash: input.refreshHash } satisfies CoordinatorState);
       return;
     }
     if (current.generation !== input.generation || current.refreshHash !== input.refreshHash) {
