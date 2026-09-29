@@ -185,7 +185,11 @@ OAuth-style integrations swap `login`/`fields` for `authorizeUrl`/`exchangeCode`
 Monzo is the third supported shape: `user-client-oauth`. Each user supplies their own confidential upstream client during authorization. See [the verified design and threat model](docs/monzo-zero-trust-research.md).
 
 Provider UX is declarative too. An integration may provide `presentation`
-(logo, wordmark, colors, setup copy) and an optional `connectionFlow`:
+(logo, wordmark, colors, setup copy) and an optional `connectionFlow`. A
+`setupGuide` explains how to create the upstream client in a small Markdown
+subset (`src/markdown.ts`). It appears on the index page and in a collapsible
+section of the provider's authorize page, with this deployment's callback URL
+filled in:
 
 ```ts
 connectionFlow: {

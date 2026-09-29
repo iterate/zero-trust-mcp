@@ -250,22 +250,22 @@ export const monzo: UserClientOAuthIntegration = {
   presentation: {
     logoSvg: MONZO_LOGO,
     productLabel: "Zero Trust MCP",
-    setupDescription: "Create one confidential client in the Monzo developer portal, then use its client ID and secret whenever you connect.",
+    setupDescription: "Enter the client ID and secret of your own confidential Monzo OAuth client. Monzo then asks you to approve access in its app.",
     securitySummary: "Nothing usable is stored here. Credentials and tokens remain inside sealed artifacts held by your browser and MCP client.",
     affiliationNotice: "Independent software. Not affiliated with or endorsed by Monzo Bank Limited.",
     setupGuide: {
-      title: "Monzo setup",
-      description: "Do this once. Keep the client for reconnects.",
-      actionLabel: "Create OAuth client",
+      title: "Create a Monzo OAuth client",
+      description: "Do this once, then reuse the client ID and secret when you reconnect. Monzo's [authentication docs](https://docs.monzo.com/#authentication) explain the flow.",
+      actionLabel: "Open Monzo developer portal",
       actionUrl: "https://developers.monzo.com/",
       steps: [
         {
-          title: "Create client",
-          description: "Sign in to Monzo’s developer portal. Choose New OAuth Client.",
+          title: "Sign in to the developer portal",
+          description: "Open [developers.monzo.com](https://developers.monzo.com/) and choose **Sign in with your Monzo account**. Monzo emails you a sign-in link. You may also need to approve the sign-in in the Monzo app.",
         },
         {
-          title: "Use these values",
-          description: "Leave Logo URL and Description blank.",
+          title: "Create the client",
+          description: "Go to **Clients**, then **New OAuth Client**. Enter these values and leave Logo URL and Description blank.\n\n**Confidential** is required. [Non-confidential clients](https://docs.monzo.com/#client-confidentiality) get no refresh token, so the connection would stop working after a few hours.",
           settings: [
             { label: "Name", value: "Zero Trust MCP", copy: true },
             { label: "Redirect URL", value: "{origin}/{id}/callback", copy: true },
@@ -273,12 +273,12 @@ export const monzo: UserClientOAuthIntegration = {
           ],
         },
         {
-          title: "Connect",
-          description: "Run a command above. Paste the client ID and secret into the authorization page.",
+          title: "Copy the credentials",
+          description: "Submit, then open the new client to find its **Client ID** and **Client secret**. Create a separate client for each MCP client: Monzo allows one active token per client, so a second connection signs out the first.",
         },
         {
-          title: "Approve",
-          description: "Open Monzo’s email link, then approve in the app. The browser confirms when it works.",
+          title: "Connect and approve",
+          description: "Enter the ID and secret in the connection form. Monzo emails you a sign-in link, then asks you to approve access to your data in the Monzo app. The connection page waits until access works.",
         },
       ],
     },

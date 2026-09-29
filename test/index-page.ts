@@ -1,4 +1,5 @@
 import { indexPage, loginPage } from "../src/html.js";
+import { renderMarkdown } from "../src/markdown.js";
 import { monzo } from "../src/integrations/monzo/index.js";
 import { yoto } from "../src/integrations/yoto/index.js";
 import { waitrose } from "../src/integrations/waitrose/index.js";
@@ -49,7 +50,7 @@ assert(html.includes("https://mcp.example.test/future/mcp"), "derives the select
 assert(html.includes('data-provider="yoto"'), "renders Yoto in the integration picker");
 assert(html.includes("https://mcp.example.test/yoto/callback"), "Yoto setup resolves the deployment callback");
 assert(html.includes("https://dashboard.yoto.dev/"), "Yoto setup links to its developer portal");
-assert(loginPage(yoto, "sealed-state").includes('name="client_secret"'), "Yoto setup collects a developer client secret");
+assert(loginPage(yoto, "https://mcp.example.test", "sealed-state").includes('name="client_secret"'), "Yoto setup collects a developer client secret");
 
 console.log("\n=== Client recipes ===");
 for (const label of ["Add to Claude", "Claude only", "Inspector", "Endpoint"]) {
@@ -67,12 +68,36 @@ assert(html.includes("Confidential"), "shows the required Monzo client confident
 assert(html.includes("Not affiliated with or endorsed by Monzo Bank Limited"), "shows the selected provider's independence notice");
 
 console.log("\n=== Provider identity ===");
-const monzoLogin = loginPage(monzo, "sealed-state");
-const waitroseLogin = loginPage(waitrose, "sealed-state");
+const monzoLogin = loginPage(monzo, "https://mcp.example.test", "sealed-state");
+const waitroseLogin = loginPage(waitrose, "https://mcp.example.test", "sealed-state");
 assert(monzoLogin.includes('viewBox="0 0 138 24"'), "uses Monzo's official wordmark geometry");
 assert(!monzoLogin.includes('viewBox="0 0 64 64"'), "does not use the synthesized Monzo mark");
 assert(monzoLogin.includes("Not affiliated with or endorsed by Monzo Bank Limited"), "disclaims Monzo affiliation on its connection page");
 assert(waitroseLogin.includes("Not affiliated with or endorsed by Waitrose &amp; Partners"), "disclaims Waitrose affiliation on its connection page");
+
+console.log("\n=== Authorize-page setup guides ===");
+const yotoLogin = loginPage(yoto, "https://mcp.example.test", "sealed-state");
+assert(monzoLogin.includes('<details class="setup" open'), "Monzo authorize page opens a collapsible setup guide");
+assert(monzoLogin.includes('data-copy="https://mcp.example.test/monzo/callback"'), "Monzo guide offers this deployment's redirect URL to copy");
+assert(monzoLogin.includes('href="https://docs.monzo.com/#client-confidentiality"'), "Monzo guide links Monzo's confidentiality docs");
+assert(monzoLogin.includes('href="https://developers.monzo.com/"'), "Monzo guide links the developer portal");
+assert(monzoLogin.includes("<strong>New OAuth Client</strong>"), "Monzo guide renders Markdown emphasis");
+assert(monzoLogin.indexOf('class="setup"') < monzoLogin.indexOf("<form"), "setup guide precedes the credential form");
+assert(yotoLogin.includes('data-copy="https://mcp.example.test/yoto/callback"'), "Yoto guide offers this deployment's callback URL to copy");
+assert(yotoLogin.includes("offline_access</code>"), "Yoto guide explains offline_access in code");
+assert(yotoLogin.includes("family:devices:manage offline_access"), "Yoto guide lists the exact scopes");
+assert(yotoLogin.includes('href="https://yoto.dev/authentication/scopes/"'), "Yoto guide links Yoto's scope docs");
+assert(!waitroseLogin.includes('class="setup"'), "password integrations have no client setup guide");
+const yotoIndex = indexPage("https://mcp.example.test", [yoto] as any);
+assert(yotoIndex.includes("https://yoto.dev/get-started/glossary/"), "index page renders the same Markdown guide");
+assert(!yotoIndex.includes("{origin}"), "index page resolves setup placeholders");
+
+console.log("\n=== Markdown subset ===");
+assert(renderMarkdown("a <script>x</script>") === "<p>a &lt;script&gt;x&lt;/script&gt;</p>", "escapes HTML");
+assert(!renderMarkdown("[x](javascript:alert(1))").includes("<a"), "links only HTTPS URLs");
+assert(renderMarkdown('[x](https://e.test/?a="b")').includes('href="https://e.test/?a=&quot;b&quot;"'), "escapes link attributes");
+assert(renderMarkdown("`**x**`") === "<p><code>**x**</code></p>", "keeps code spans literal");
+assert(renderMarkdown("one\n\n- a\n- b") === "<p>one</p><ul><li>a</li><li>b</li></ul>", "renders paragraphs and lists");
 
 console.log("\n=== Minimal public page ===");
 assert(html.includes("Read the code"), "links to the source in the header");

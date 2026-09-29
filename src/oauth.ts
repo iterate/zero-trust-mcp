@@ -251,7 +251,7 @@ export async function handleAuthorizeGet(request: Request, integration: Integrat
   );
 
   if (integration.kind === "password" || integration.kind === "user-client-oauth") {
-    return htmlResponse(loginPage(integration, state));
+    return htmlResponse(loginPage(integration, url.origin, state));
   }
   // OAuth integration: hand off to the upstream provider; our sealed state
   // rides through its `state` parameter.
@@ -335,7 +335,7 @@ export async function handleAuthorizePost(request: Request, integration: Integra
   for (const field of integration.fields) {
     const value = form.get(field.name);
     if (typeof value !== "string" || !value) {
-      return htmlResponse(loginPage(integration, sealedState, `Please fill in ${field.label}`), 400);
+      return htmlResponse(loginPage(integration, new URL(request.url).origin, sealedState, `Please fill in ${field.label}`), 400);
     }
     creds[field.name] = value;
   }
@@ -354,7 +354,7 @@ export async function handleAuthorizePost(request: Request, integration: Integra
     return beginClientHandoff(integration, state, result, env);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Login failed";
-    return htmlResponse(loginPage(integration, sealedState, message), 401);
+    return htmlResponse(loginPage(integration, new URL(request.url).origin, sealedState, message), 401);
   }
 }
 

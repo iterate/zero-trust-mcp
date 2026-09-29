@@ -64,27 +64,35 @@ export const yoto: UserClientOAuthIntegration = {
     { name: "client_secret", label: "Yoto client secret", type: "password" },
   ],
   presentation: {
-    setupDescription: "Connect your Yoto library and players using your own confidential developer client. You sign in on Yoto's website.",
+    setupDescription: "Enter the client ID and secret of your own confidential Yoto application. You then sign in on Yoto's website.",
     securitySummary: "Client credentials and Yoto tokens stay inside sealed artifacts held by your MCP client. This server does not persist them.",
     affiliationNotice: "Independent software. Not affiliated with or endorsed by Yoto.",
     setupGuide: {
-      title: "Yoto setup",
-      description: "Create a confidential application, then keep its client ID and secret for reconnects.",
-      actionLabel: "Open Yoto developer portal",
+      title: "Create a Yoto application",
+      description: "Do this once, then reuse the client ID and secret when you reconnect. Yoto's [getting started guide](https://yoto.dev/get-started/start-here/) covers developer accounts.",
+      actionLabel: "Open Yoto developer dashboard",
       actionUrl: "https://dashboard.yoto.dev/",
       steps: [
         {
-          title: "Create a confidential client",
-          description: "Use a confidential (server-side) application with these settings. Enable the listed permissions and refresh-token access.",
+          title: "Create an application",
+          description: "Sign in to the [Yoto developer dashboard](https://dashboard.yoto.dev/) with your Yoto account and create a new application.",
+        },
+        {
+          title: "Use these settings",
+          description: "Choose a **confidential** client, which keeps its secret on a server ([public vs confidential](https://yoto.dev/get-started/glossary/)). Add the callback URL and select every scope below.\n\n- `offline_access` is required, or the connection cannot refresh.\n- Yoto marks apps using player control or management scopes as unverified ([scopes](https://yoto.dev/authentication/scopes/)). That is fine for personal use.",
           settings: [
-            { label: "Callback URL", value: "{origin}/{id}/callback", copy: true },
             { label: "Client type", value: "Confidential" },
+            { label: "Callback URL", value: "{origin}/{id}/callback", copy: true },
             { label: "Scopes", value: YOTO_SCOPES, copy: true },
           ],
         },
         {
+          title: "Copy the credentials",
+          description: "Save the application, then copy its **client ID** and **client secret**.",
+        },
+        {
           title: "Connect and sign in",
-          description: "Add the MCP endpoint, enter your developer client ID and secret, then sign in and consent on Yoto. Your Yoto password is entered only on Yoto's site.",
+          description: "Enter the ID and secret in the connection form, then sign in and consent on Yoto's site. Your Yoto password is entered only there.",
         },
       ],
     },

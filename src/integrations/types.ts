@@ -42,6 +42,11 @@ export interface IntegrationPresentation {
   securitySummary?: string;
   /** Provider-specific independence/trademark notice shown on connection surfaces. */
   affiliationNotice?: string;
+  /**
+   * How to create the upstream client, shown on the index and authorize pages.
+   * Descriptions are a small Markdown subset (see src/markdown.ts) and, like
+   * setting values, support {origin} and {id}.
+   */
   setupGuide?: {
     title: string;
     description: string;
@@ -52,7 +57,7 @@ export interface IntegrationPresentation {
       description: string;
       settings?: Array<{
         label: string;
-        /** Supports {origin} and {id}, resolved by the catalogue page. */
+        /** Supports {origin} and {id}. */
         value: string;
         copy?: boolean;
       }>;

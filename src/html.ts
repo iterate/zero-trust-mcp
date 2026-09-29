@@ -4,10 +4,7 @@ import type {
   PasswordIntegration,
   UserClientOAuthIntegration,
 } from "./integrations/types.js";
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
+import { escapeHtml, renderMarkdown } from "./markdown.js";
 
 const DEFAULT_COLORS = {
   background: "#f4f4f2",
@@ -35,7 +32,58 @@ function brandMarkup(integration: Integration): string {
   </div>`;
 }
 
-function documentStart(integration: Integration, title: string): string {
+function resolvePlaceholders(value: string, origin: string, id: string): string {
+  return value.replaceAll("{origin}", origin).replaceAll("{id}", id);
+}
+
+/** Setup guide description and steps, shared by the authorize and index pages. */
+function setupGuideBody(integration: Pick<Integration, "id" | "presentation">, origin: string): string {
+  const guide = integration.presentation?.setupGuide;
+  if (!guide) return "";
+  const markdown = (text: string) => renderMarkdown(resolvePlaceholders(text, origin, integration.id));
+  const steps = guide.steps.map((step) => {
+    const settings = step.settings?.length
+      ? `<div class="settings">${step.settings.map((setting) => {
+          const value = resolvePlaceholders(setting.value, origin, integration.id);
+          const copy = setting.copy
+            ? `<button class="setting-copy" type="button" data-copy="${escapeHtml(value)}" aria-label="Copy ${escapeHtml(setting.label)}">copy</button>`
+            : "";
+          return `<div class="setting"><div><span class="setting-label">${escapeHtml(setting.label)}</span><span class="setting-value">${escapeHtml(value)}</span></div>${copy}</div>`;
+        }).join("")}</div>`
+      : "";
+    return `<li class="guide-step"><h3>${escapeHtml(step.title)}</h3><div class="md">${markdown(step.description)}</div>${settings}</li>`;
+  }).join("");
+  return `<div class="md guide-description">${markdown(guide.description)}</div><ol class="guide-steps">${steps}</ol>`;
+}
+
+/** Clipboard helper plus a delegated handler for every [data-copy] button. */
+const COPY_SCRIPT = `
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      const fallback = document.createElement("textarea");
+      fallback.value = text;
+      fallback.setAttribute("readonly", "");
+      fallback.style.position = "fixed";
+      fallback.style.opacity = "0";
+      document.body.appendChild(fallback);
+      fallback.select();
+      const copied = document.execCommand("copy");
+      fallback.remove();
+      return copied;
+    }
+  }
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest && event.target.closest("[data-copy]");
+    if (!button) return;
+    const copied = await copyText(button.dataset.copy);
+    button.textContent = copied ? "copied" : "select";
+    setTimeout(() => { button.textContent = "copy"; }, 1600);
+  });`;
+
+function documentStart(integration: Integration, title: string, wide = false): string {
   const presentation = presentationFor(integration);
   const colors = presentation.colors!;
   return `<!doctype html>
@@ -78,10 +126,40 @@ function documentStart(integration: Integration, title: string): string {
   .check { display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border-radius: 50%; background: var(--subtle); color: var(--ink); font-size: 1.25rem; margin-bottom: 1.15rem; }
   @keyframes pulse { 70% { box-shadow: 0 0 0 .45rem transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
   @media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
+  .card.wide { width: min(33rem, 100%); }
+  .setup { margin: 0 0 1.4rem; border: 1px solid rgba(20,35,60,.10); border-radius: 12px; }
+  .setup summary { display: flex; justify-content: space-between; gap: 1rem; padding: .85rem 1rem; cursor: pointer; font-size: .86rem; font-weight: 700; list-style: none; }
+  .setup summary::-webkit-details-marker { display: none; }
+  .setup summary::after { content: "+"; color: #667085; font-weight: 500; }
+  .setup[open] summary::after { content: "−"; }
+  .setup-body { padding: 0 1rem 1rem; color: #3f4a56; font-size: .8rem; line-height: 1.5; }
+  .md p { margin: 0; }
+  .md p + p, .md ul { margin: .45rem 0 0; }
+  .md ul { padding-left: 1.1rem; }
+  .md a, .portal-link { color: var(--ink); font-weight: 650; text-decoration-thickness: 1px; text-underline-offset: .15em; }
+  .md code { padding: .05rem .25rem; border-radius: 4px; background: var(--subtle); font: 500 .72rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .guide-steps { display: grid; gap: 1rem; margin: 1rem 0 0; padding: 0; list-style: none; counter-reset: setup-step; }
+  .guide-step { position: relative; padding-left: 1.85rem; counter-increment: setup-step; }
+  .guide-step::before { content: counter(setup-step); position: absolute; left: 0; top: .05rem; display: grid; place-items: center; width: 1.3rem; height: 1.3rem; border-radius: 50%; background: var(--subtle); color: var(--ink); font: 700 .66rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .guide-step h3 { margin: 0 0 .2rem; color: var(--ink); font-size: .84rem; }
+  .settings { display: grid; gap: .6rem; margin-top: .6rem; padding: .7rem .8rem; border-radius: 9px; background: var(--subtle); }
+  .setting { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .6rem; align-items: center; }
+  .setting-label { display: block; color: #667085; font: 700 .6rem ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; text-transform: uppercase; }
+  .setting-value { display: block; color: var(--ink); font: 500 .72rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: break-word; }
+  .settings .setting-copy { display: inline-block; width: auto; margin: 0; padding: .28rem .5rem; border: 1px solid rgba(20,35,60,.14); border-radius: 6px; background: #fff; color: #526071; font: 700 .62rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .portal-link { display: inline-block; margin-top: 1rem; font-size: .8rem; }
+  @media (max-width: 480px) {
+    body { padding: .75rem; }
+    .card { padding: 1.5rem 1.1rem; }
+    .setup summary { padding: .8rem; }
+    .setup-body { padding: 0 .8rem .9rem; }
+    .guide-step { padding-left: 1.6rem; }
+    .settings { padding: .65rem; }
+  }
 </style>
 </head>
 <body>
-<main class="card">
+<main class="card${wide ? " wide" : ""}">
   ${brandMarkup(integration)}`;
 }
 
@@ -100,7 +178,7 @@ function documentEnd(): string {
   return `</main></body></html>`;
 }
 
-export function loginPage(integration: Integration, sealedState: string, error?: string): string {
+export function loginPage(integration: Integration, origin: string, sealedState: string, error?: string): string {
   const credentialIntegration = integration as PasswordIntegration | UserClientOAuthIntegration;
   const isUserClientOAuth = integration.kind === "user-client-oauth";
   const fields = credentialIntegration.fields
@@ -118,9 +196,31 @@ export function loginPage(integration: Integration, sealedState: string, error?:
       : `An MCP client is requesting access to ${integration.name} on your behalf.`
   );
 
-  return `${documentStart(integration, `Connect ${integration.name}`)}
+  const guide = integration.presentation?.setupGuide;
+  // Open by default for first-time setup; a collapse is remembered per provider.
+  const setup = guide
+    ? `<details class="setup" open data-setup="${escapeHtml(integration.id)}">
+    <summary>${escapeHtml(guide.title)}</summary>
+    <div class="setup-body">
+      ${setupGuideBody(integration, origin)}
+      <a class="portal-link" href="${escapeHtml(guide.actionUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(guide.actionLabel)} ↗</a>
+    </div>
+  </details>
+  <script>
+    ${COPY_SCRIPT}
+    (function () {
+      var setup = document.querySelector("details.setup");
+      var key = "setup-collapsed:" + setup.dataset.setup;
+      try { if (localStorage.getItem(key) === "1") setup.open = false; } catch (e) {}
+      setup.addEventListener("toggle", function () { try { localStorage.setItem(key, setup.open ? "0" : "1"); } catch (e) {} });
+    })();
+  </script>`
+    : "";
+
+  return `${documentStart(integration, `Connect ${integration.name}`, Boolean(guide))}
   <h1>${isUserClientOAuth ? `Connect ${escapeHtml(integration.name)}` : `Connect your ${escapeHtml(integration.name)} account`}</h1>
   <p class="sub">${escapeHtml(description)}</p>
+  ${setup}
   ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
   <form method="post" action="/${integration.id}/authorize">
     <input type="hidden" name="state" value="${escapeHtml(sealedState)}" />
@@ -178,27 +278,18 @@ export function indexPage(
   origin: string,
   integrations: Array<Pick<Integration, "id" | "name" | "presentation">>,
 ): string {
-  const resolveSetupValue = (value: string, id: string) => value
-    .replaceAll("{origin}", origin)
-    .replaceAll("{id}", id);
-  const catalog = integrations.map(({ id, name, presentation }) => ({
-    id,
-    name,
-    endpoint: `${origin}/${id}/mcp`,
-    affiliationNotice: presentation?.affiliationNotice,
-    setupGuide: presentation?.setupGuide
-      ? {
-          ...presentation.setupGuide,
-          steps: presentation.setupGuide.steps.map((step) => ({
-            ...step,
-            settings: step.settings?.map((setting) => ({
-              ...setting,
-              value: resolveSetupValue(setting.value, id),
-            })),
-          })),
-        }
-      : undefined,
-  }));
+  const catalog = integrations.map((integration) => {
+    const guide = integration.presentation?.setupGuide;
+    return {
+      id: integration.id,
+      name: integration.name,
+      endpoint: `${origin}/${integration.id}/mcp`,
+      affiliationNotice: integration.presentation?.affiliationNotice,
+      setupGuide: guide
+        ? { title: guide.title, actionLabel: guide.actionLabel, actionUrl: guide.actionUrl, html: setupGuideBody(integration, origin) }
+        : undefined,
+    };
+  });
   const catalogJson = JSON.stringify(catalog).replace(/</g, "\\u003c");
   const providers = catalog
     .map(
@@ -265,12 +356,16 @@ export function indexPage(
   .guide-head { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:.4rem 2rem; }
   .guide-head h2 { margin:0; font-size:1.55rem; font-weight:500; letter-spacing:-.025em; }
   .guide-description { max-width:44rem; margin:.35rem 0 0; color:var(--muted); font-size:.85rem; }
+  .md p { margin:0; }
+  .md p + p, .md ul { margin:.45rem 0 0; }
+  .md ul { padding-left:1.1rem; }
+  .md code { padding:.05rem .25rem; border-radius:.25rem; background:var(--panel); font:500 .72rem ui-monospace,SFMono-Regular,Menlo,monospace; }
   .portal-button { font:700 .72rem ui-monospace,SFMono-Regular,Menlo,monospace; }
   .guide-steps { display:grid; gap:1.35rem; margin:1.8rem 0 0; padding:0; list-style:none; counter-reset:setup-step; }
   .guide-step { display:grid; grid-template-columns:1.5rem minmax(8rem,10rem) minmax(0,1fr); gap:1rem; counter-increment:setup-step; }
   .guide-step::before { display:grid; place-items:center; align-self:start; width:1.35rem; height:1.35rem; border-radius:50%; background:color-mix(in srgb,var(--accent) 12%,transparent); content:counter(setup-step); color:var(--accent); font:700 .65rem ui-monospace,SFMono-Regular,Menlo,monospace; }
   .guide-step h3 { margin:.15rem 0 0; font-size:.9rem; }
-  .guide-step > p { margin:.12rem 0 0; color:var(--muted); font-size:.82rem; line-height:1.45; }
+  .guide-step > .md { margin:.12rem 0 0; color:var(--muted); font-size:.82rem; line-height:1.45; }
   .settings { grid-column:3; display:grid; gap:.65rem; margin-top:.25rem; padding:.75rem .9rem; border-radius:.5rem; background:var(--panel); }
   .setting { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.7rem; align-items:baseline; }
   .setting-label,.setting-value { display:block; }
@@ -281,7 +376,7 @@ export function indexPage(
   @media (max-width:650px) {
     .shell{width:min(100% - 1.25rem,68rem);padding-top:1rem}.top-panels{grid-template-columns:1fr;margin:1.6rem 0 3.5rem}h1{font-size:clamp(2.7rem,15vw,4rem)}.thesis{margin-bottom:3.5rem;font-size:.98rem}
     .provider-browser{grid-template-columns:6.6rem minmax(0,1fr);gap:1rem}.provider-list{top:.5rem}.provider{padding:.65rem .5rem .65rem 1.1rem}.provider::before{left:.45rem}.provider span{font-size:.92rem}.provider small{display:none}.add-provider{margin-left:.5rem;font-size:.61rem}
-    .provider-head{display:block;margin-bottom:1.25rem}.provider-head h2{font-size:1.65rem}.endpoint{max-width:none;margin-top:.4rem;text-align:left}.tabs{width:100%}.tab{flex:1 1 45%;padding:.4rem .3rem}.command{padding-right:3.6rem}.guide{margin-top:3rem}.guide-head{display:block}.portal-button{display:inline-block;margin-top:.55rem}.guide-step{grid-template-columns:1.35rem minmax(0,1fr)}.guide-step>p,.settings{grid-column:2}.guide-step h3{margin-top:.08rem}
+    .provider-head{display:block;margin-bottom:1.25rem}.provider-head h2{font-size:1.65rem}.endpoint{max-width:none;margin-top:.4rem;text-align:left}.tabs{width:100%}.tab{flex:1 1 45%;padding:.4rem .3rem}.command{padding-right:3.6rem}.guide{margin-top:3rem}.guide-head{display:block}.portal-button{display:inline-block;margin-top:.55rem}.guide-step{grid-template-columns:1.35rem minmax(0,1fr)}.guide-step>.md,.settings{grid-column:2}.guide-step h3{margin-top:.08rem}
   }
   @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto!important; transition:none!important; } }
 </style></head>
@@ -334,8 +429,7 @@ export function indexPage(
             <h2 id="guide-title"></h2>
             <a class="portal-button" id="guide-action" target="_blank" rel="noopener"></a>
           </div>
-          <p class="guide-description" id="guide-description"></p>
-          <ol class="guide-steps" id="guide-steps"></ol>
+          <div id="guide-body"></div>
         </section>
       </section>
     </section>
@@ -369,59 +463,17 @@ export function indexPage(
   const providerEndpoint = document.getElementById("provider-endpoint");
   const guide = document.getElementById("setup-guide");
   const guideTitle = document.getElementById("guide-title");
-  const guideDescription = document.getElementById("guide-description");
   const guideAction = document.getElementById("guide-action");
-  const guideSteps = document.getElementById("guide-steps");
+  const guideBody = document.getElementById("guide-body");
   function renderGuide() {
     const setup = selectedProvider.setupGuide;
     guide.hidden = !setup;
     if (!setup) return;
     guideTitle.textContent = setup.title;
-    guideDescription.textContent = setup.description;
     guideAction.textContent = setup.actionLabel + " ↗";
     guideAction.href = setup.actionUrl;
-    guideSteps.replaceChildren(...setup.steps.map((step) => {
-      const item = document.createElement("li");
-      item.className = "guide-step";
-      const title = document.createElement("h3");
-      title.textContent = step.title;
-      const detail = document.createElement("p");
-      detail.textContent = step.description;
-      item.append(title, detail);
-      if (step.settings?.length) {
-        const settings = document.createElement("div");
-        settings.className = "settings";
-        step.settings.forEach((setting) => {
-          const row = document.createElement("div");
-          row.className = "setting";
-          const text = document.createElement("div");
-          const label = document.createElement("span");
-          label.className = "setting-label";
-          label.textContent = setting.label;
-          const value = document.createElement("span");
-          value.className = "setting-value";
-          value.textContent = setting.value;
-          text.append(label, value);
-          row.append(text);
-          if (setting.copy) {
-            const button = document.createElement("button");
-            button.className = "setting-copy";
-            button.type = "button";
-            button.textContent = "copy";
-            button.setAttribute("aria-label", "Copy " + setting.label);
-            button.addEventListener("click", async () => {
-              const copied = await copyText(setting.value);
-              button.textContent = copied ? "copied" : "select";
-              setTimeout(() => { button.textContent = "copy"; }, 1600);
-            });
-            row.append(button);
-          }
-          settings.append(row);
-        });
-        item.append(settings);
-      }
-      return item;
-    }));
+    // Server-rendered from source-controlled copy with escaped Markdown.
+    guideBody.innerHTML = setup.html;
   }
   function render() {
     const recipe = recipes[selectedRecipe](selectedProvider);
@@ -450,23 +502,7 @@ export function indexPage(
     document.querySelectorAll(".tab").forEach((item) => { const active = item === button; item.classList.toggle("selected", active); item.setAttribute("aria-pressed", String(active)); });
     render();
   }));
-  async function copyText(text) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      const fallback = document.createElement("textarea");
-      fallback.value = text;
-      fallback.setAttribute("readonly", "");
-      fallback.style.position = "fixed";
-      fallback.style.opacity = "0";
-      document.body.appendChild(fallback);
-      fallback.select();
-      const copied = document.execCommand("copy");
-      fallback.remove();
-      return copied;
-    }
-  }
+${COPY_SCRIPT}
   document.querySelector(".copy").addEventListener("click", async () => {
     const copied = await copyText(code.textContent);
     const button = document.querySelector(".copy");
