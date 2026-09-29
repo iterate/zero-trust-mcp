@@ -208,16 +208,33 @@ one adapter object and one registry entry even if the catalogue grows large.
 
 The `grant` is whatever your integration needs to mint future sessions: credentials for password APIs (like Waitrose, where refresh doesn't work), the upstream refresh token for OAuth APIs (like Gmail would be). It's sealed into the refresh token and never stored.
 
+## Waitrose checkout
+
+Tools: `search_products`, `get_trolley`, `add_to_trolley`, `remove_from_trolley`,
+`get_orders`, `get_order`, `get_account_info`, `get_current_slot`, `list_slot_dates`,
+`list_slots`, `book_slot`, `get_checkout`, and `place_order`.
+
+Book a slot, review `get_checkout`, then authorize the order before calling
+`place_order` with the reviewed order ID and estimated total/currency. The library
+refreshes order context and checks eligibility and totals before submitting once.
+An unknown outcome must be checked with `get_order` before retrying. Accounts
+requiring payment setup or challenges use the returned Waitrose checkout URL.
+
+The Waitrose dependency is pinned to the checkout implementation's Git commit
+until a package release includes it. [Library APK research](https://github.com/jonastemplestein/waitrose/blob/2e25adb653ccc4153727f86e1b824fe56e75e99d/docs/checkout-research.md)
+records the native instant-checkout endpoint. No live purchase was used to test it.
+Run `bun test/waitrose-tools.ts` for the MCP-to-library contract checks.
+
 ## Yoto
 
 Yoto has a [public developer API](https://yoto.dev/api/) and existing community
 MCP servers. This adapter brings it into the same hosted, sealed-credential
 model as the other integrations. [Research and API references](docs/yoto-research.md)
-explain the existing alternatives and why APK reverse engineering was unnecessary.
+document the public API and Android APK evidence used for playback.
 
 1. Create a **confidential** application at [dashboard.yoto.dev](https://dashboard.yoto.dev/).
 2. Set the allowed callback to `https://<worker>/yoto/callback`.
-3. Enable `family:library:view user:content:manage family:devices:view offline_access`.
+3. Enable `family:library:view user:content:manage family:devices:view family:devices:control offline_access`.
 4. Add `https://<worker>/yoto/mcp` to your MCP client. Enter your developer client
    ID and secret in the setup form, then sign in and consent on Yoto's site.
 
@@ -225,11 +242,16 @@ explain the existing alternatives and why APK reverse engineering was unnecessar
 claude mcp add --transport http yoto https://<worker>/yoto/mcp
 ```
 
-Tools: `list_players`, `list_myo_cards`, `get_card`, `list_library_groups`,
-`get_library_group`, and `create_streaming_card`. Streaming cards take public
-HTTPS MP3/AAC URLs and need internet during playback; link them to physical MYO
-cards in the Yoto app. Group listings do not enumerate all ungrouped purchased
-cards. Local audio uploads and live playback/status over MQTT are not included.
+Tools: `list_players`, `list_library`, `get_library_card`, `list_myo_cards`,
+`get_card`, `list_library_groups`, `get_library_group`, `create_streaming_card`,
+`play_card`, `pause_playback`, `resume_playback`, `stop_playback`, `set_volume`,
+and `set_sleep_timer`. Play supports chapter/track selection and seeking;
+volume uses 0–100 percent. Commands report API acceptance, not device execution.
+Existing connections must enable `family:devices:control` and reconnect.
+
+Streaming cards take public HTTPS MP3/AAC URLs and need internet during playback;
+link them to physical MYO cards in the Yoto app. Local audio uploads and live
+playback state/acknowledgements over MQTT are not included.
 
 `bun run test:yoto` exercises OAuth, all tools, concurrent refresh and storage
 boundaries against a fake provider using the real Worker. **A real Yoto account

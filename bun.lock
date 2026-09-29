@@ -6,7 +6,7 @@
       "name": "zero-trust-mcp",
       "dependencies": {
         "@modelcontextprotocol/server": "2.0.0-beta.1",
-        "waitrose": "1.2.1",
+        "waitrose": "github:jonastemplestein/waitrose#2e25adb653ccc4153727f86e1b824fe56e75e99d",
         "zod": "^4.2.0",
       },
       "devDependencies": {
@@ -191,7 +191,7 @@
 
     "unenv": ["unenv@2.0.0-rc.24", "", { "dependencies": { "pathe": "^2.0.3" } }, "sha512-i7qRCmY42zmCwnYlh9H2SvLEypEFGye5iRmEMKjcGi7zk9UquigRjFtTLz0TYqr0ZGLZhaMHl/foy1bZR+Cwlw=="],
 
-    "waitrose": ["waitrose@1.2.1", "", { "peerDependencies": { "typescript": "^5" }, "bin": { "waitrose": "src/cli.ts" } }, "sha512-0HNxgVymbr+XkZLlxnv5+tGO0Ti8E3SpQehiBAv1lkxU1zR53o2hhFSR7GJaMlBJnxUE2uNPBT16R1nttzaWXA=="],
+    "waitrose": ["waitrose@github:jonastemplestein/waitrose#2e25adb", { "peerDependencies": { "typescript": "^5" }, "bin": { "waitrose": "./src/cli.ts" } }, "jonastemplestein-waitrose-2e25adb"],
 
     "workerd": ["workerd@1.20260630.1", "", { "optionalDependencies": { "@cloudflare/workerd-darwin-64": "1.20260630.1", "@cloudflare/workerd-darwin-arm64": "1.20260630.1", "@cloudflare/workerd-linux-64": "1.20260630.1", "@cloudflare/workerd-linux-arm64": "1.20260630.1", "@cloudflare/workerd-windows-64": "1.20260630.1" }, "bin": { "workerd": "bin/workerd" } }, "sha512-7M0AA4l14hmPGtzQ5YPHyXosIKI/uz3TdcPHeiFDbgb7/0c8ECVMzIaodSV5bZIVhDHL0OlzqITAdPiwAr+dTg=="],
 
