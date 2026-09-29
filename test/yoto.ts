@@ -81,12 +81,18 @@ let playerConfig = { maxVolumeLimit: "16", nightMaxVolumeLimit: "8" };
 let apiCalls = 0;
 const commands: { path: string; body: any }[] = [];
 
+let upstreamChallenge = "";
 const upstream = Bun.serve({
   port: 0,
   async fetch(request) {
     const url = new URL(request.url);
 
     if (url.pathname === "/" || url.pathname === "/authorize") {
+      // Like login.yotoplay.com, refuse authorization without S256 PKCE.
+      if (url.searchParams.get("code_challenge_method") !== "S256" || !url.searchParams.get("code_challenge")) {
+        return new Response("invalid_request : The PKCE protocol extension is required.", { status: 400 });
+      }
+      upstreamChallenge = url.searchParams.get("code_challenge")!;
       const redirect = new URL(url.searchParams.get("redirect_uri") ?? "");
       redirect.searchParams.set("code", "fake-yoto-code");
       redirect.searchParams.set("state", url.searchParams.get("state") ?? "");
@@ -100,6 +106,9 @@ const upstream = Bun.serve({
       }
       if (form.get("grant_type") === "authorization_code") {
         assert(form.get("code") === "fake-yoto-code" && form.get("redirect_uri") === `${workerOrigin}/yoto/callback`, "upstream code exchange binds the code and callback");
+        const verifier = form.get("code_verifier") ?? "";
+        const verifierHash = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))).toString("base64url");
+        if (verifierHash !== upstreamChallenge) return Response.json({ error: "invalid_grant" }, { status: 403 });
         if (tokenMode === "missing-refresh") return Response.json({ access_token: INITIAL_ACCESS, expires_in: 30, token_type: "Bearer" });
         if (tokenMode === "malformed") return new Response(FAKE_CLIENT_SECRET);
         return Response.json({

@@ -112,6 +112,8 @@ export interface OAuthIntegration extends IntegrationBase {
 /**
  * OAuth provider where every user supplies their own confidential client.
  * The credentials travel only in client-held sealed protocol artifacts.
+ * The engine creates an upstream PKCE pair for every authorization and seals
+ * the verifier into `state`; providers that do not support PKCE ignore it.
  */
 export interface UserClientOAuthIntegration extends IntegrationBase {
   kind: "user-client-oauth";
@@ -121,12 +123,14 @@ export interface UserClientOAuthIntegration extends IntegrationBase {
     state: string,
     credentials: Record<string, string>,
     env: Env,
+    pkce: { codeChallenge: string },
   ): string;
   exchangeCode(
     code: string,
     callbackUrl: string,
     credentials: Record<string, string>,
     env: Env,
+    pkce: { codeVerifier: string },
   ): Promise<GrantResult>;
 }
 

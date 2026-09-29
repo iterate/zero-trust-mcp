@@ -23,7 +23,7 @@
  * beyond spec compliance is required.
  */
 
-import { seal, unseal, sha256b64url, nowSeconds } from "./seal.js";
+import { b64url, seal, unseal, sha256b64url, nowSeconds } from "./seal.js";
 import type {
   Env,
   GrantResult,
@@ -56,6 +56,8 @@ interface StatePayload {
   cc: string; // PKCE challenge (S256)
   /** User-supplied upstream OAuth client, present only after the setup POST. */
   uc?: Record<string, string>;
+  /** Upstream PKCE verifier, created alongside `uc`. */
+  uv?: string;
   exp: number;
 }
 
@@ -307,7 +309,7 @@ async function beginClientHandoff(
   env: Env,
 ): Promise<Response> {
   if (!integration.connectionFlow) return finishAuthorize(state, result, env.SEAL_KEY);
-  const browserState = { ...state, uc: undefined };
+  const browserState = { ...state, uc: undefined, uv: undefined };
   const handoff = await seal(
     {
       t: "handoff",
@@ -339,9 +341,11 @@ export async function handleAuthorizePost(request: Request, integration: Integra
   }
 
   if (integration.kind === "user-client-oauth") {
-    const continuedState = await seal({ ...state, uc: creds } satisfies StatePayload, env.SEAL_KEY);
+    const codeVerifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
+    const continuedState = await seal({ ...state, uc: creds, uv: codeVerifier } satisfies StatePayload, env.SEAL_KEY);
     const callbackUrl = `${new URL(request.url).origin}/${integration.id}/callback`;
-    return Response.redirect(integration.authorizeUrl(callbackUrl, continuedState, creds, env), 302);
+    const pkce = { codeChallenge: await sha256b64url(codeVerifier) };
+    return Response.redirect(integration.authorizeUrl(callbackUrl, continuedState, creds, env, pkce), 302);
   }
 
   try {
@@ -367,7 +371,7 @@ export async function handleUpstreamCallback(request: Request, integration: Inte
     const callbackUrl = `${url.origin}/${integration.id}/callback`;
     const result =
       integration.kind === "user-client-oauth"
-        ? await integration.exchangeCode(code, callbackUrl, state.uc ?? {}, env)
+        ? await integration.exchangeCode(code, callbackUrl, state.uc ?? {}, env, { codeVerifier: state.uv ?? "" })
         : await integration.exchangeCode(code, callbackUrl, env);
     return beginClientHandoff(integration, state, result, env);
   } catch (error) {

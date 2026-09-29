@@ -33,6 +33,13 @@ The adapter uses the existing `user-client-oauth` contract, like Monzo:
    `https://api.yotoplay.com`. The user enters their password only on Yoto.
 4. The Worker exchanges the code at `https://login.yotoplay.com/oauth/token`.
    MCP-facing authorization continues to require PKCE S256.
+
+Yoto also requires PKCE on its own authorize request, even for a confidential
+client. Without it, `login.yotoplay.com` shows an error page reading
+`invalid_request : The PKCE protocol extension is required.` (observed
+29 September 2026). The Worker creates an S256 verifier for each authorization,
+seals it into the upstream `state`, and sends it with the client secret during
+the code exchange. Nothing is stored.
 5. Access and refresh tokens are sealed into the MCP client's protocol tokens.
 
 The [authentication guide](https://yoto.dev/authentication/browser-auth/)

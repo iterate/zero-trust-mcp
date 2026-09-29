@@ -90,7 +90,8 @@ export const yoto: UserClientOAuthIntegration = {
     },
   },
 
-  authorizeUrl(callbackUrl, state, credentials, env) {
+  // Yoto rejects authorization requests without PKCE, even for confidential clients.
+  authorizeUrl(callbackUrl, state, credentials, env, { codeChallenge }) {
     const url = new URL("/authorize", env.YOTO_AUTH_ORIGIN ?? "https://login.yotoplay.com");
     url.search = new URLSearchParams({
       response_type: "code",
@@ -99,11 +100,13 @@ export const yoto: UserClientOAuthIntegration = {
       audience: "https://api.yotoplay.com",
       scope: YOTO_SCOPES,
       state,
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
     }).toString();
     return url.toString();
   },
 
-  async exchangeCode(code, callbackUrl, credentials, env) {
+  async exchangeCode(code, callbackUrl, credentials, env, { codeVerifier }) {
     if (!credentials.client_id || !credentials.client_secret) throw new Error("Yoto client ID and secret are required");
     const response = await fetch(`${env.YOTO_AUTH_ORIGIN ?? "https://login.yotoplay.com"}/oauth/token`, {
       method: "POST",
@@ -114,6 +117,7 @@ export const yoto: UserClientOAuthIntegration = {
         client_secret: credentials.client_secret,
         redirect_uri: callbackUrl,
         code,
+        code_verifier: codeVerifier,
       }),
       redirect: "manual",
       signal: AbortSignal.timeout(15_000),
