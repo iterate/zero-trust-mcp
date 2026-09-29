@@ -14,7 +14,7 @@ The implementation satisfies that invariant as follows:
 - One Durable Object per connection persists only `{ generation, SHA-256(current refresh token) }`.
 - The coordinator receives credentials transiently during refresh, coalesces overlapping refreshes in memory, persists the successor hash before returning, and never persists the token response.
 - Worker observability is disabled because request logs could otherwise retain bearer tokens or sealed OAuth state.
-- There is no transaction mirror, webhook ingestion, background sync, or operator-key escrow.
+- There is no transaction mirror, webhook ingestion, background sync, or operator-key escrow. Webhook tools register a user-supplied receiver with Monzo; the Worker never receives the events.
 
 This protects against an at-rest compromise of Worker configuration plus Durable Object storage. It does not protect against a malicious or actively compromised Worker runtime: the runtime necessarily sees usable tokens while serving a request.
 
@@ -38,9 +38,19 @@ This protects against an at-rest compromise of Worker configuration plus Durable
 ### API surface
 
 - Implemented reads are `/ping/whoami`, `/accounts`, `/balance`, `/pots`, and `/transactions` with `expand[]=merchant`.
+- Implemented writes are webhook management: `POST /webhooks`, `GET /webhooks`, and `DELETE /webhooks/{id}`. Monzo sends `transaction.created` events with full transaction and merchant data to the registered URL, retrying failures up to five times. ([Developer API: Webhooks](https://docs.monzo.com/#webhooks))
 - Transaction pagination supports `since`, `before`, and `limit`; Monzo documents a maximum page size of 100. This MCP tool caps responses at 50 to protect model context. ([Developer API](https://docs.monzo.com/))
-- Monzo documents `429` but no contractual numeric rate limit. Write tools and bulk history fetching are intentionally omitted from this first integration.
+- Monzo documents `429` but no contractual numeric rate limit. Money movement, annotations, and bulk history fetching are intentionally omitted.
 - Monzo's developer API is intended for a user's own account or a small allowlisted set, not general public applications. BYO clients reduce credential custody but are not an explicit Monzo endorsement of a public hosted connector. Keep this deployment personal/small-scale unless Monzo approves a broader use. ([Developer API introduction](https://docs.monzo.com/))
+
+### Webhooks
+
+A registered webhook sends account data outside this design's boundary, to whatever URL was registered. Disconnecting the MCP client does not delete it. `register_webhook` therefore accepts HTTPS only and tells the model to use only URLs the user supplied. This limits, but cannot prevent, a prompt-injected agent registering an attacker's URL.
+
+- Monzo does not document payload signatures. Receivers should put an unguessable secret in the URL and treat bodies as untrusted.
+- Monzo lists only the webhooks "your application has registered", so `list_webhooks` will not show one registered through a different OAuth client.
+- Monzo does not document deduplicating registrations, so the tool is marked non-idempotent and tells the model to check `list_webhooks` first.
+- `bun run test:monzo:tools` checks each tool's method, path, form encoding, and HTTPS validation against a stubbed `fetch`. No live webhook has been registered.
 
 ## OAuth flow
 

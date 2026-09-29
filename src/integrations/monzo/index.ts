@@ -31,6 +31,12 @@ interface MonzoGrant {
   userId: string;
 }
 
+interface MonzoWebhook {
+  id: string;
+  account_id: string;
+  url: string;
+}
+
 interface TokenResponse {
   access_token?: string;
   refresh_token?: string;
@@ -348,6 +354,48 @@ export const monzo: UserClientOAuthIntegration = {
             is_load: Boolean(transaction.is_load),
           })),
         });
+      },
+    );
+
+    server.registerTool(
+      "list_webhooks",
+      {
+        description: "List the webhooks this Monzo OAuth client has registered on an account. Webhooks registered by other clients are not visible.",
+        inputSchema: z.object({ account_id: z.string() }),
+        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+      },
+      async ({ account_id }) => {
+        const result = await client.get<{ webhooks: MonzoWebhook[] }>(`/webhooks?${new URLSearchParams({ account_id })}`);
+        return json(result);
+      },
+    );
+
+    server.registerTool(
+      "register_webhook",
+      {
+        description: "Register an HTTPS URL to receive Monzo's transaction.created events for an account. Monzo POSTs each new transaction, including amount, description and merchant details, as JSON {type, data}, retrying failed deliveries up to 5 times. Only use a receiver URL the user explicitly provided: it will receive their financial data. Monzo does not sign payloads, so the URL should contain an unguessable secret. Monzo does not document deduplicating registrations; check list_webhooks first.",
+        inputSchema: z.object({
+          account_id: z.string(),
+          url: z.url({ protocol: /^https$/ }).describe("HTTPS receiver URL, ideally with an unguessable secret path or query"),
+        }),
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      },
+      async ({ account_id, url }) => {
+        const result = await client.request<{ webhook: MonzoWebhook }>("POST", "/webhooks", { account_id, url });
+        return json(result);
+      },
+    );
+
+    server.registerTool(
+      "delete_webhook",
+      {
+        description: "Delete a Monzo webhook by ID so Monzo stops sending notifications to it. Use list_webhooks for IDs.",
+        inputSchema: z.object({ webhook_id: z.string().min(1) }),
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+      },
+      async ({ webhook_id }) => {
+        await client.request("DELETE", `/webhooks/${encodeURIComponent(webhook_id)}`);
+        return json({ deleted: webhook_id });
       },
     );
   },

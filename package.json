@@ -12,6 +12,7 @@
     "test:yoto:authoring": "bun test test/yoto-authoring.test.ts",
     "test:yoto": "bun test/yoto.ts",
     "test:monzo": "bun test/monzo-concurrency.ts",
+    "test:monzo:tools": "bun test/monzo-tools.ts",
     "test:site": "bun test/index-page.ts",
     "typecheck": "tsc --noEmit"
   },
