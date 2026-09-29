@@ -24,12 +24,10 @@ function presentationFor(integration: Integration): Required<Pick<IntegrationPre
 
 function brandMarkup(integration: Integration): string {
   const presentation = presentationFor(integration);
-  if (!presentation.logoSvg && !presentation.wordmark) return "";
-  return `<div class="brand" aria-label="${escapeHtml(integration.name)} and Zero Trust MCP">
-    ${presentation.logoSvg ?? ""}
-    ${presentation.wordmark ? `<span class="wordmark">${escapeHtml(presentation.wordmark)}</span>` : ""}
-    <span class="product">${escapeHtml(presentation.productLabel)}</span>
-  </div>`;
+  const mark = `${presentation.logoSvg ?? ""}${presentation.wordmark ? `<span class="wordmark">${escapeHtml(presentation.wordmark)}</span>` : ""}`;
+  return `<header class="brand" aria-label="${escapeHtml(integration.name)} and ${escapeHtml(presentation.productLabel)}">
+    ${mark}<span class="product">${escapeHtml(presentation.productLabel)}</span>
+  </header>`;
 }
 
 function resolvePlaceholders(value: string, origin: string, id: string): string {
@@ -53,7 +51,8 @@ function setupGuideBody(integration: Pick<Integration, "id" | "presentation">, o
       : "";
     return `<li class="guide-step"><h3>${escapeHtml(step.title)}</h3><div class="md">${markdown(step.description)}</div>${settings}</li>`;
   }).join("");
-  return `<div class="md guide-description">${markdown(guide.description)}</div><ol class="guide-steps">${steps}</ol>`;
+  const description = guide.description ? `<div class="md guide-description">${markdown(guide.description)}</div>` : "";
+  return `${description}<ol class="guide-steps">${steps}</ol>`;
 }
 
 /** Clipboard helper plus a delegated handler for every [data-copy] button. */
@@ -83,7 +82,7 @@ const COPY_SCRIPT = `
     setTimeout(() => { button.textContent = "copy"; }, 1600);
   });`;
 
-function documentStart(integration: Integration, title: string, wide = false): string {
+function documentStart(integration: Integration, title: string, layout: "narrow" | "split" = "narrow"): string {
   const presentation = presentationFor(integration);
   const colors = presentation.colors!;
   return `<!doctype html>
@@ -94,88 +93,105 @@ function documentStart(integration: Integration, title: string, wide = false): s
 <meta name="color-scheme" content="light" />
 <title>${escapeHtml(title)}</title>
 <style>
+  /* Provider-branded connect page, deliberately light. Narrow card for a single
+     task; "split" puts the form beside the one-time setup guide on wide screens
+     and below it on phones. System text face, monospace for values to copy. */
   :root {
     --page: ${escapeHtml(colors.background)};
     --ink: ${escapeHtml(colors.ink)};
     --accent: ${escapeHtml(colors.accent)};
     --accent-ink: ${escapeHtml(colors.accentInk)};
     --subtle: ${escapeHtml(colors.subtle)};
+    --surface: #ffffff;
+    --muted: #4f5b6b;
+    --line: rgba(20, 35, 60, .14);
+    --danger: #b3261e;
+    --danger-bg: #fdecea;
+    --text: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; display: grid; place-items: center; min-height: 100vh; margin: 0; padding: 1.25rem; background: var(--page); color: var(--ink); }
-  .card { background: #fff; width: min(25rem, 100%); padding: 2rem; border: 1px solid rgba(20,35,60,.10); border-radius: 18px; box-shadow: 0 18px 50px rgba(20,35,60,.10); }
-  .brand { display: flex; align-items: center; gap: .7rem; margin-bottom: 2.2rem; }
+  body { margin: 0; padding-block: 2.5rem; padding-inline: 1rem; min-height: 100vh; display: grid; place-items: start center; background: var(--page); color: var(--ink); font: 1rem/1.55 var(--text); -webkit-font-smoothing: antialiased; }
+  .card { width: min(28rem, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 16px 48px rgba(20, 35, 60, .08); overflow: hidden; }
+  .card.split { width: min(62rem, 100%); }
+  .pane { padding: 2.25rem; min-width: 0; }
+  .brand { display: flex; align-items: center; gap: .75rem; margin-bottom: 2rem; }
   .brand svg { width: auto; max-width: 8.625rem; height: 1.5rem; flex: none; }
-  .wordmark { font-size: 1.35rem; font-weight: 760; letter-spacing: -.055em; }
-  .product { margin-left: auto; color: #667085; font-size: .68rem; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; }
-  .eyebrow { color: #667085; font-size: .7rem; font-weight: 700; letter-spacing: .08em; margin: 0 0 .7rem; text-transform: uppercase; }
-  h1 { font-size: 1.75rem; line-height: 1.08; letter-spacing: -.045em; margin: 0 0 .65rem; }
-  p.sub { color: #526071; font-size: .9rem; line-height: 1.5; margin: 0 0 1.6rem; }
-  label { display: block; color: #26364d; font-size: .76rem; font-weight: 650; margin: 1rem 0 .3rem; }
-  input:not([type=hidden]) { width: 100%; background: #fff; color: var(--ink); border: 1px solid #bdc7c3; border-radius: 10px; padding: .72rem .8rem; outline: none; font-size: .95rem; transition: border-color .15s, box-shadow .15s; }
-  input:not([type=hidden]):focus { border-color: var(--ink); box-shadow: 0 0 0 3px rgba(20,35,60,.10); }
-  button, .button { display: block; width: 100%; margin-top: 1.35rem; padding: .82rem; border: 0; border-radius: 999px; background: var(--accent); color: var(--accent-ink); font: inherit; font-weight: 750; text-align: center; text-decoration: none; cursor: pointer; }
-  button:hover, .button:hover { filter: brightness(1.06); }
-  .error { background: #fdecea; color: #b3261e; border-radius: 8px; padding: .6rem .8rem; font-size: .85rem; margin-bottom: 1rem; }
-  .security-note { display: flex; gap: .65rem; align-items: flex-start; background: var(--subtle); border-radius: 11px; padding: .8rem .9rem; color: #31565b; font-size: .75rem; line-height: 1.45; margin-top: 1rem; }
-  .security-note b { color: var(--ink); }
-  .note { color: #707b88; font-size: .72rem; line-height: 1.45; text-align: center; margin: 1.25rem 0 0; }
-  .affiliation-note { color: #707b88; font-size: .68rem; line-height: 1.45; text-align: center; margin: .65rem 0 0; }
-  .status { display: flex; align-items: center; gap: .55rem; color: #526071; font-size: .78rem; margin-top: 1rem; }
-  .pulse { width: .55rem; height: .55rem; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent); animation: pulse 1.8s infinite; }
-  .check { display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border-radius: 50%; background: var(--subtle); color: var(--ink); font-size: 1.25rem; margin-bottom: 1.15rem; }
-  @keyframes pulse { 70% { box-shadow: 0 0 0 .45rem transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+  .wordmark { font-size: 1.35rem; font-weight: 760; letter-spacing: -.04em; }
+  .product { margin-left: auto; color: var(--muted); font-size: .75rem; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
+  .product:first-child { margin-left: 0; }
+  h1 { margin: 0; font-size: 1.75rem; line-height: 1.15; letter-spacing: -.03em; text-wrap: balance; }
+  .sub { margin: .6rem 0 0; color: var(--muted); }
+  .guide-jump { display: inline-block; margin-top: .75rem; color: var(--ink); font-size: .9375rem; font-weight: 650; }
+  form { display: grid; gap: 1rem; margin-top: 1.75rem; }
+  label { display: grid; gap: .35rem; font-size: .875rem; font-weight: 650; }
+  input:not([type=hidden]) { width: 100%; padding: .75rem .85rem; border: 1px solid #b7c1c8; border-radius: 10px; background: var(--surface); color: var(--ink); font: inherit; }
+  input:not([type=hidden]):focus-visible { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgba(20, 35, 60, .14); }
+  button, .button { display: block; width: 100%; padding: .85rem 1rem; border: 0; border-radius: 999px; background: var(--accent); color: var(--accent-ink); font: 700 1rem var(--text); text-align: center; text-decoration: none; cursor: pointer; }
+  button:hover, .button:hover { filter: brightness(1.05); }
+  button:focus-visible, .button:focus-visible, a:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  form button { margin-top: .5rem; }
+  .error { margin-top: 1.25rem; padding: .7rem .85rem; border-radius: 10px; background: var(--danger-bg); color: var(--danger); font-size: .9375rem; }
+  .fine { margin: 1.5rem 0 0; color: var(--muted); font-size: .8125rem; line-height: 1.5; }
+  .fine + .fine { margin-top: .5rem; }
+  .status { display: flex; align-items: center; gap: .6rem; margin-top: 1rem; color: var(--muted); font-size: .875rem; }
+  .pulse { width: .55rem; height: .55rem; flex: none; border-radius: 50%; background: var(--accent); animation: pulse 1.8s infinite; }
+  .check { display: grid; place-items: center; width: 2.5rem; height: 2.5rem; margin-bottom: 1rem; border-radius: 50%; background: var(--subtle); font-size: 1.25rem; }
+  .actions { margin-top: 1.75rem; }
+  @keyframes pulse { 50% { opacity: .35; } }
   @media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
-  .card.wide { width: min(33rem, 100%); }
-  .setup { margin: 0 0 1.4rem; border: 1px solid rgba(20,35,60,.10); border-radius: 12px; }
-  .setup summary { display: flex; justify-content: space-between; gap: 1rem; padding: .85rem 1rem; cursor: pointer; font-size: .86rem; font-weight: 700; list-style: none; }
-  .setup summary::-webkit-details-marker { display: none; }
-  .setup summary::after { content: "+"; color: #667085; font-weight: 500; }
-  .setup[open] summary::after { content: "−"; }
-  .setup-body { padding: 0 1rem 1rem; color: #3f4a56; font-size: .8rem; line-height: 1.5; }
+
+  .guide { background: var(--subtle); border-top: 1px solid var(--line); }
+  .guide-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .25rem 1rem; }
+  .guide h2 { margin: 0; font-size: 1.25rem; line-height: 1.3; letter-spacing: -.02em; }
+  .docs-link { color: var(--ink); font-size: .875rem; font-weight: 650; }
+  .md { font-size: .9375rem; }
   .md p { margin: 0; }
-  .md p + p, .md ul { margin: .45rem 0 0; }
-  .md ul { padding-left: 1.1rem; }
-  .md a, .portal-link { color: var(--ink); font-weight: 650; text-decoration-thickness: 1px; text-underline-offset: .15em; }
-  .md code { padding: .05rem .25rem; border-radius: 4px; background: var(--subtle); font: 500 .72rem ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .guide-steps { display: grid; gap: 1rem; margin: 1rem 0 0; padding: 0; list-style: none; counter-reset: setup-step; }
-  .guide-step { position: relative; padding-left: 1.85rem; counter-increment: setup-step; }
-  .guide-step::before { content: counter(setup-step); position: absolute; left: 0; top: .05rem; display: grid; place-items: center; width: 1.3rem; height: 1.3rem; border-radius: 50%; background: var(--subtle); color: var(--ink); font: 700 .66rem ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .guide-step h3 { margin: 0 0 .2rem; color: var(--ink); font-size: .84rem; }
-  .settings { display: grid; gap: .6rem; margin-top: .6rem; padding: .7rem .8rem; border-radius: 9px; background: var(--subtle); }
-  .setting { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .6rem; align-items: center; }
-  .setting-label { display: block; color: #667085; font: 700 .6rem ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; text-transform: uppercase; }
-  .setting-value { display: block; color: var(--ink); font: 500 .72rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: break-word; }
-  .settings .setting-copy { display: inline-block; width: auto; margin: 0; padding: .28rem .5rem; border: 1px solid rgba(20,35,60,.14); border-radius: 6px; background: #fff; color: #526071; font: 700 .62rem ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .portal-link { display: inline-block; margin-top: 1rem; font-size: .8rem; }
-  @media (max-width: 480px) {
-    body { padding: .75rem; }
-    .card { padding: 1.5rem 1.1rem; }
-    .setup summary { padding: .8rem; }
-    .setup-body { padding: 0 .8rem .9rem; }
-    .guide-step { padding-left: 1.6rem; }
-    .settings { padding: .65rem; }
+  .md p + p, .md ul { margin: .5rem 0 0; }
+  .md ul { padding-left: 1.15rem; }
+  .md a { color: var(--ink); font-weight: 650; text-decoration-thickness: 1px; text-underline-offset: .15em; }
+  .md code { padding: .05rem .3rem; border-radius: 5px; background: var(--surface); font: .8125rem var(--mono); }
+  .guide-description { margin-top: .5rem; color: var(--muted); }
+  .guide-steps { display: grid; gap: 1.5rem; margin: 1.5rem 0 0; padding: 0; list-style: none; counter-reset: step; }
+  .guide-step { position: relative; padding-left: 2.25rem; counter-increment: step; }
+  .guide-step::before { content: counter(step); position: absolute; left: 0; top: 0; display: grid; place-items: center; width: 1.5rem; height: 1.5rem; border-radius: 50%; background: var(--ink); color: var(--surface); font: 700 .75rem/1 var(--mono); }
+  .guide-step h3 { margin: 0 0 .3rem; font-size: 1rem; line-height: 1.5rem; }
+  .settings { display: grid; gap: .75rem; margin-top: .85rem; padding: .85rem 1rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+  .setting { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .75rem; align-items: center; }
+  .setting-label { display: block; color: var(--muted); font-size: .75rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+  .setting-value { display: block; font: .875rem/1.45 var(--mono); overflow-wrap: break-word; }
+  .settings .setting-copy { width: auto; padding: .3rem .6rem; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font: 700 .75rem var(--mono); }
+
+  @media (min-width: 56rem) {
+    .card.split { display: grid; grid-template-columns: minmax(0, 25rem) minmax(0, 1fr); }
+    .split .guide { border-top: 0; border-left: 1px solid var(--line); }
+    .split .guide-jump { display: none; }
+  }
+  @media (max-width: 30rem) {
+    body { padding-block: 1rem; }
+    .pane { padding: 1.5rem 1.25rem; }
+    .guide-step { padding-left: 2rem; }
+    .settings { padding: .75rem; }
   }
 </style>
 </head>
-<body>
-<main class="card${wide ? " wide" : ""}">
-  ${brandMarkup(integration)}`;
+<body>`;
 }
 
+/** One trust statement per page: the provider's own, or the generic one. */
 function securityNote(integration: Integration): string {
-  const summary = integration.presentation?.securitySummary;
-  if (!summary) return "";
-  return `<div class="security-note"><span aria-hidden="true">↳</span><span>${escapeHtml(summary)}</span></div>`;
+  const summary = integration.presentation?.securitySummary
+    ?? "This server keeps no copy of your credentials. They travel encrypted inside the tokens your MCP client holds.";
+  return `<p class="fine">${escapeHtml(summary)}</p>`;
 }
 
 function affiliationNote(integration: Integration): string {
   const notice = integration.presentation?.affiliationNotice;
-  return notice ? `<p class="affiliation-note">${escapeHtml(notice)}</p>` : "";
+  return notice ? `<p class="fine">${escapeHtml(notice)}</p>` : "";
 }
 
 function documentEnd(): string {
-  return `</main></body></html>`;
+  return `</body></html>`;
 }
 
 export function loginPage(integration: Integration, origin: string, sealedState: string, error?: string): string {
@@ -184,52 +200,51 @@ export function loginPage(integration: Integration, origin: string, sealedState:
   const fields = credentialIntegration.fields
     .map(
       (field) => `
-      <label for="${field.name}">${escapeHtml(field.label)}</label>
-      <input id="${field.name}" name="${field.name}" type="${field.type}" required autocomplete="${
-        isUserClientOAuth ? "off" : field.type === "password" ? "current-password" : "username"
-      }" />`,
+      <label for="${field.name}">${escapeHtml(field.label)}
+        <input id="${field.name}" name="${field.name}" type="${field.type}" required autocomplete="${
+          isUserClientOAuth ? "off" : field.type === "password" ? "current-password" : "username"
+        }" />
+      </label>`,
     )
-    .join("\n");
+    .join("");
   const description = integration.presentation?.setupDescription ?? (
     isUserClientOAuth
-      ? `Enter the confidential OAuth client you created in the ${integration.name} developer portal.`
-      : `An MCP client is requesting access to ${integration.name} on your behalf.`
+      ? `Enter the client ID and secret from your ${integration.name} developer account.`
+      : `Sign in to let your MCP client use ${integration.name} on your behalf.`
   );
-
   const guide = integration.presentation?.setupGuide;
-  // Open by default for first-time setup; a collapse is remembered per provider.
-  const setup = guide
-    ? `<details class="setup" open data-setup="${escapeHtml(integration.id)}">
-    <summary>${escapeHtml(guide.title)}</summary>
-    <div class="setup-body">
-      ${setupGuideBody(integration, origin)}
-      <a class="portal-link" href="${escapeHtml(guide.actionUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(guide.actionLabel)} ↗</a>
+
+  const formPane = `<section class="pane">
+    ${brandMarkup(integration)}
+    <h1>${isUserClientOAuth ? `Connect ${escapeHtml(integration.name)}` : `Connect your ${escapeHtml(integration.name)} account`}</h1>
+    <p class="sub">${escapeHtml(description)}</p>
+    ${guide ? `<a class="guide-jump" href="#setup">No client yet? Create one first ↓</a>` : ""}
+    ${error ? `<div class="error" role="alert">${escapeHtml(error)}</div>` : ""}
+    <form method="post" action="/${integration.id}/authorize">
+      <input type="hidden" name="state" value="${escapeHtml(sealedState)}" />
+      ${fields}
+      <button type="submit">${isUserClientOAuth ? `Continue to ${escapeHtml(integration.name)}` : "Sign in"}</button>
+    </form>
+    ${securityNote(integration)}
+    ${affiliationNote(integration)}
+  </section>`;
+
+  const guidePane = guide
+    ? `<section class="pane guide" id="setup" aria-labelledby="setup-title">
+    <div class="guide-head">
+      <h2 id="setup-title">${escapeHtml(guide.title)}</h2>
+      <a class="docs-link" href="${escapeHtml(guide.actionUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(guide.actionLabel)} ↗</a>
     </div>
-  </details>
-  <script>
-    ${COPY_SCRIPT}
-    (function () {
-      var setup = document.querySelector("details.setup");
-      var key = "setup-collapsed:" + setup.dataset.setup;
-      try { if (localStorage.getItem(key) === "1") setup.open = false; } catch (e) {}
-      setup.addEventListener("toggle", function () { try { localStorage.setItem(key, setup.open ? "0" : "1"); } catch (e) {} });
-    })();
-  </script>`
+    ${setupGuideBody(integration, origin)}
+  </section>
+  <script>${COPY_SCRIPT}</script>`
     : "";
 
-  return `${documentStart(integration, `Connect ${integration.name}`, Boolean(guide))}
-  <h1>${isUserClientOAuth ? `Connect ${escapeHtml(integration.name)}` : `Connect your ${escapeHtml(integration.name)} account`}</h1>
-  <p class="sub">${escapeHtml(description)}</p>
-  ${setup}
-  ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
-  <form method="post" action="/${integration.id}/authorize">
-    <input type="hidden" name="state" value="${escapeHtml(sealedState)}" />
-    ${fields}
-    <button type="submit">${isUserClientOAuth ? `Continue to ${escapeHtml(integration.name)}` : "Sign in &amp; authorize"}</button>
-  </form>
-  ${securityNote(integration)}
-  <p class="note">Zero Trust MCP does not persist upstream credentials or tokens.</p>
-  ${affiliationNote(integration)}
+  return `${documentStart(integration, `Connect ${integration.name}`, guide ? "split" : "narrow")}
+<main class="card${guide ? " split" : ""}">
+  ${formPane}
+  ${guidePane}
+</main>
 ${documentEnd()}`;
 }
 
@@ -254,23 +269,28 @@ export function connectionPage(integration: Integration, options: ConnectionPage
       ? flow.pendingDescription
       : flow.readyDescription;
 
+  const action = pending
+    ? `<form id="connection-check" class="actions" method="post" action="/${integration.id}/complete">
+      <input type="hidden" name="handoff" value="${escapeHtml(options.handoff ?? "")}" />
+      <button type="submit">${escapeHtml(flow.checkLabel)}</button>
+    </form>
+    <div class="status"><span class="pulse" aria-hidden="true"></span><span>This page checks again every few seconds.</span></div>
+    <script>setTimeout(function () { var form = document.getElementById("connection-check"); if (form && document.visibilityState === "visible") form.requestSubmit(); }, 2500);</script>`
+    : `<div class="actions"><a class="button" href="${escapeHtml(options.returnUrl ?? "")}" target="_blank" rel="noopener">${escapeHtml(flow.returnLabel)}</a></div>
+    <p class="fine">You can close this page afterwards.</p>`;
+
   return `${documentStart(integration, title)}
-  ${pending ? `<p class="eyebrow">One last step</p>` : `<div class="check" aria-hidden="true">✓</div>`}
-  <h1>${escapeHtml(title)}</h1>
-  <p class="sub">${escapeHtml(description)}</p>
-  ${
-    pending
-      ? `<form id="connection-check" method="post" action="/${integration.id}/complete">
-    <input type="hidden" name="handoff" value="${escapeHtml(options.handoff ?? "")}" />
-    <button type="submit">${escapeHtml(flow.checkLabel)}</button>
-  </form>
-  <div class="status"><span class="pulse" aria-hidden="true"></span><span>Checking securely—this page will update automatically.</span></div>
-  <script>setTimeout(function () { var form = document.getElementById("connection-check"); if (form && document.visibilityState === "visible") form.requestSubmit(); }, 2500);</script>`
-      : `<a class="button" href="${escapeHtml(options.returnUrl ?? "")}" target="_blank" rel="noopener">${escapeHtml(flow.returnLabel)}</a>
-  <p class="note">The connection is ready. The button finishes the OAuth handoff in your MCP client; you can then close this page.</p>`
-  }
-  ${securityNote(integration)}
-  ${affiliationNote(integration)}
+<main class="card">
+  <section class="pane">
+    ${brandMarkup(integration)}
+    ${pending ? "" : `<div class="check" aria-hidden="true">✓</div>`}
+    <h1>${escapeHtml(title)}</h1>
+    <p class="sub">${escapeHtml(description)}</p>
+    ${action}
+    ${securityNote(integration)}
+    ${affiliationNote(integration)}
+  </section>
+</main>
 ${documentEnd()}`;
 }
 

@@ -49,7 +49,7 @@ export interface IntegrationPresentation {
    */
   setupGuide?: {
     title: string;
-    description: string;
+    description?: string;
     actionLabel: string;
     actionUrl: string;
     steps: Array<{

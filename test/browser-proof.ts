@@ -41,7 +41,7 @@ ab("open", u.toString());
 ab("find", "label", "Email", "fill", username);
 ab("find", "label", "Password", "fill", password);
 console.log("submitting…");
-ab("find", "role", "button", "click", "--name", "Sign in & authorize");
+ab("find", "role", "button", "click", "--name", "Sign in");
 
 let code = "";
 const t0 = Date.now();

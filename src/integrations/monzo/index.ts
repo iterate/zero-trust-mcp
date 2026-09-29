@@ -250,22 +250,21 @@ export const monzo: UserClientOAuthIntegration = {
   presentation: {
     logoSvg: MONZO_LOGO,
     productLabel: "Zero Trust MCP",
-    setupDescription: "Enter the client ID and secret of your own confidential Monzo OAuth client. Monzo then asks you to approve access in its app.",
-    securitySummary: "Nothing usable is stored here. Credentials and tokens remain inside sealed artifacts held by your browser and MCP client.",
+    setupDescription: "Enter the client ID and secret from your Monzo OAuth client. Monzo then emails you a sign-in link and asks you to approve access in its app.",
+    securitySummary: "This server keeps no copy of your client secret or Monzo tokens. They travel encrypted inside the tokens your MCP client holds.",
     affiliationNotice: "Independent software. Not affiliated with or endorsed by Monzo Bank Limited.",
     setupGuide: {
       title: "Create a Monzo OAuth client",
-      description: "Do this once, then reuse the client ID and secret when you reconnect. Monzo's [authentication docs](https://docs.monzo.com/#authentication) explain the flow.",
-      actionLabel: "Open Monzo developer portal",
-      actionUrl: "https://developers.monzo.com/",
+      actionLabel: "Monzo API docs",
+      actionUrl: "https://docs.monzo.com/#authentication",
       steps: [
         {
           title: "Sign in to the developer portal",
-          description: "Open [developers.monzo.com](https://developers.monzo.com/) and choose **Sign in with your Monzo account**. Monzo emails you a sign-in link. You may also need to approve the sign-in in the Monzo app.",
+          description: "Go to [developers.monzo.com](https://developers.monzo.com/) and choose **Sign in with your Monzo account**. Open the sign-in link Monzo emails you. You may also need to approve the sign-in in the Monzo app.",
         },
         {
           title: "Create the client",
-          description: "Go to **Clients**, then **New OAuth Client**. Enter these values and leave Logo URL and Description blank.\n\n**Confidential** is required. [Non-confidential clients](https://docs.monzo.com/#client-confidentiality) get no refresh token, so the connection would stop working after a few hours.",
+          description: "Open **Clients** and choose **New OAuth Client**. Enter these values and leave Logo URL and Description empty. Confidentiality must be **Confidential**, because [other clients](https://docs.monzo.com/#client-confidentiality) get no refresh token and the connection would stop after a few hours.",
           settings: [
             { label: "Name", value: "Zero Trust MCP", copy: true },
             { label: "Redirect URL", value: "{origin}/{id}/callback", copy: true },
@@ -273,12 +272,8 @@ export const monzo: UserClientOAuthIntegration = {
           ],
         },
         {
-          title: "Copy the credentials",
-          description: "Submit, then open the new client to find its **Client ID** and **Client secret**. Create a separate client for each MCP client: Monzo allows one active token per client, so a second connection signs out the first.",
-        },
-        {
-          title: "Connect and approve",
-          description: "Enter the ID and secret in the connection form. Monzo emails you a sign-in link, then asks you to approve access to your data in the Monzo app. The connection page waits until access works.",
+          title: "Copy the ID and secret",
+          description: "Submit, then open the new client. Its **Client ID** and **Client secret** go into the connection form. Keep them for reconnecting. Each MCP client needs its own Monzo client, because Monzo allows only one active token per client.",
         },
       ],
     },
@@ -292,12 +287,12 @@ export const monzo: UserClientOAuthIntegration = {
   },
   connectionFlow: {
     instructionTitle: "Approve in the Monzo app",
-    instructionDescription: "Monzo has authenticated you. Open the Monzo app and approve the pending developer access request; this page will keep checking securely.",
+    instructionDescription: "Open the Monzo app and approve the request to access your data.",
     pendingTitle: "Still waiting for Monzo",
-    pendingDescription: "Open Monzo and look for “Login/Approval Request” or “Allow access to your data”. Once approved, this page will update automatically.",
+    pendingDescription: "In the Monzo app, approve the “Allow access to your data” request. It can also appear as “Login/Approval Request”.",
     readyTitle: "Monzo is connected",
-    readyDescription: "Account access is approved and Zero Trust MCP is ready to answer through your MCP client.",
-    checkLabel: "I’ve approved — check again",
+    readyDescription: "Monzo approved access to your account data.",
+    checkLabel: "I’ve approved, check now",
     returnLabel: "Return to your MCP client",
     async check(rawSession, env) {
       const session = rawSession as MonzoSession;
@@ -311,8 +306,8 @@ export const monzo: UserClientOAuthIntegration = {
     },
   },
   fields: [
-    { name: "client_id", label: "OAuth client ID", type: "text" },
-    { name: "client_secret", label: "OAuth client secret", type: "password" },
+    { name: "client_id", label: "Client ID", type: "text" },
+    { name: "client_secret", label: "Client secret", type: "password" },
   ],
 
   authorizeUrl(callbackUrl, state, credentials, env) {
