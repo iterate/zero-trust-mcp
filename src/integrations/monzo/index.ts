@@ -358,6 +358,22 @@ export const monzo: UserClientOAuthIntegration = {
     );
 
     server.registerTool(
+      "get_transaction",
+      {
+        description: "Get one Monzo transaction by ID with full merchant details, notes, metadata and settlement state. Use IDs from list_transactions or webhook events.",
+        inputSchema: z.object({ transaction_id: z.string().min(1) }),
+        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+      },
+      async ({ transaction_id }) => {
+        const params = new URLSearchParams([["expand[]", "merchant"]]);
+        const { transaction } = await client.get<{ transaction: Record<string, any> }>(
+          `/transactions/${encodeURIComponent(transaction_id)}?${params}`,
+        );
+        return json({ transaction: { ...transaction, formatted: formatAmount(transaction.amount, transaction.currency) } });
+      },
+    );
+
+    server.registerTool(
       "list_webhooks",
       {
         description: "List the webhooks this Monzo OAuth client has registered on an account. Webhooks registered by other clients are not visible.",

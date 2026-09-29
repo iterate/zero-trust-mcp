@@ -11,6 +11,7 @@ const server = {
 
 monzo.registerTools(server, { accessToken: "test-access-token", userId: "user_test", apiOrigin: "https://monzo.test" });
 
+assert.equal(tools.get("get_transaction")!.config.annotations.readOnlyHint, true);
 assert.equal(tools.get("list_webhooks")!.config.annotations.readOnlyHint, true);
 assert.equal(tools.get("register_webhook")!.config.annotations.idempotentHint, false);
 assert.equal(tools.get("delete_webhook")!.config.annotations.destructiveHint, true);
@@ -33,11 +34,25 @@ globalThis.fetch = (async (input, init) => {
     body: init?.body ? String(init.body) : null,
   };
   calls.push(call);
+  const path = new URL(call.url).pathname;
+  if (path.startsWith("/transactions/")) {
+    return Response.json({ transaction: { id: "tx_1", amount: -1234, currency: "GBP", notes: "lunch", merchant: { name: "Deli" } } });
+  }
   const webhook = { id: "webhook_1", account_id: "acc_1", url: "https://hooks.example/s3cret" };
   if (call.method === "POST") return Response.json({ webhook });
   if (call.method === "DELETE") return Response.json({});
   return Response.json({ webhooks: [webhook] });
 }) as typeof fetch;
+
+const transaction = await tools.get("get_transaction")!.handler({ transaction_id: "tx_1" });
+assert.deepEqual(calls.at(-1), {
+  method: "GET",
+  url: "https://monzo.test/transactions/tx_1?expand%5B%5D=merchant",
+  contentType: null,
+  body: null,
+});
+assert.equal(transaction.structuredContent.transaction.notes, "lunch");
+assert.equal(transaction.structuredContent.transaction.formatted, "-£12.34");
 
 const registered = await tools.get("register_webhook")!.handler({ account_id: "acc_1", url: "https://hooks.example/s3cret" });
 assert.deepEqual(calls.at(-1), {
@@ -62,4 +77,4 @@ await assert.rejects(
   /outcome may be unknown/,
 );
 
-console.log("✅ Monzo webhook tool contract passed");
+console.log("✅ Monzo tool contract passed");

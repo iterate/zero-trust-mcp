@@ -37,7 +37,7 @@ This protects against an at-rest compromise of Worker configuration plus Durable
 
 ### API surface
 
-- Implemented reads are `/ping/whoami`, `/accounts`, `/balance`, `/pots`, and `/transactions` with `expand[]=merchant`.
+- Implemented reads are `/ping/whoami`, `/accounts`, `/balance`, `/pots`, `/transactions`, and `/transactions/{id}`, the last two with `expand[]=merchant`.
 - Implemented writes are webhook management: `POST /webhooks`, `GET /webhooks`, and `DELETE /webhooks/{id}`. Monzo sends `transaction.created` events with full transaction and merchant data to the registered URL, retrying failures up to five times. ([Developer API: Webhooks](https://docs.monzo.com/#webhooks))
 - Transaction pagination supports `since`, `before`, and `limit`; Monzo documents a maximum page size of 100. This MCP tool caps responses at 50 to protect model context. ([Developer API](https://docs.monzo.com/))
 - Monzo documents `429` but no contractual numeric rate limit. Money movement, annotations, and bulk history fetching are intentionally omitted.
